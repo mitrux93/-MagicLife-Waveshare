@@ -4,7 +4,9 @@
 #include <Preferences.h>
 #include <string.h>
 
-// Waveshare ESP32-S3-Knob-Touch-LCD-1.8; JC3636W518 V2
+// Magic Life 1.1 — firmware sperimentale per JC3636W518 V2 / ST77916.
+// NON usare su chip secondario ESP32-U4WDH; scrivere solo su ESP32-S3.
+// Pin e init display adattati dal progetto MTG Life Counter di juggernautwins608.
 #define LCD_CS 14
 #define LCD_CLK 13
 #define LCD_D0 15
@@ -51,6 +53,7 @@ void bigNum(int n,int y,int z,uint16_t color){
 void base(){lcd->fillScreen(ML_BG);lcd->drawCircle(180,180,175,ML_EDGE);}
 void menu(){
  base();center("MAGIC LIFE",44,3,ML_WHITE);
+ center("v1.1 / ST77916",78,1,ML_MUTED);
  center("GIOCATORI",101,2,ML_MUTED);
  button(65,131,108,48,"1",3,players==1?ML_BLUE:ML_PANEL);
  button(187,131,108,48,"2",3,players==2?ML_ORANGE:ML_PANEL);
@@ -68,7 +71,8 @@ void one(){
  button(124,298,112,35,"MENU",2,ML_PANEL);
 }
 void two(){
- base();center("P1",31,3,selected==0?ML_WHITE:ML_BLUE);
+ base();lcd->drawFastHLine(28,180,304,ML_EDGE);
+ center("P1",31,3,selected==0?ML_WHITE:ML_BLUE);
  bigNum(life[0],94,5,life[0]<=0?ML_RED:ML_BLUE);
  control(61,110,false,ML_BLUE);control(299,110,true,ML_BLUE);
  button(134,162,92,35,"MENU",2,ML_PANEL);
