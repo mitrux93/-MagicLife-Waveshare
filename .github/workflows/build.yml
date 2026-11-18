@@ -37,7 +37,7 @@ jobs:
           test -s build/MagicLife_Waveshare.ino.partitions.bin
       - name: Unisci immagini flash
         run: |
-          python3 -m pip install 'esptool==4.8.1'
+          python3 -m pip install 'esptool==4.7.0'
           mkdir -p firmware
           BOOT_APP0="$HOME/.arduino15/packages/esp32/hardware/esp32/2.0.14/tools/partitions/boot_app0.bin"
           test -s "$BOOT_APP0"
