@@ -1,17 +1,30 @@
-# ⚠️ STOP: firmware non adatto al Waveshare Knob 1.8
+# Magic Life v1.1 — segnapunti Magic: The Gathering
 
-**NON CARICARE il file `MagicLife_ESP32S3_FLASH_0x0.bin` generato dalla workflow di novembre 2026 sul Waveshare ESP32-S3-Knob-Touch-LCD-1.8.**
+Firmware sperimentale, compilato per ESP32-S3 con display **ST77916 360 × 360** e collegamenti di riferimento **JC3636W518 V2**.
 
-Dopo la compilazione è emerso un errore di identificazione dell'hardware: il codice attuale usa il driver ST77916 e pin di una diversa scheda JC3636W518 V2. Il Waveshare Knob 1.8 usa invece un pannello SH8601 con specifica sequenza di inizializzazione, una mappatura diversa dei GPIO e un controllo touch diverso. Anche se il codice Arduino compila, **non è stato validato sul Knob** e rischia di mostrare schermo nero e funzionamento errato.
+## Funzioni
+- Schermata iniziale: scelta di 1 o 2 giocatori
+- Punti vita iniziali: 20 o 40
+- Punteggi indipendenti, regolabili con touch
+- Ghiera: cambia le vite del giocatore selezionato
+- Salvataggio locale dei punti vita
+- Menu per iniziare una nuova partita
 
-La workflow GitHub Actions deve essere considerata solo come test di compilazione per la revisione sbagliata; non come rilascio installabile. Il firmware per Knob va riscritto con il BSP/hardware esatto e testato prima del flash.
+## ⚠️ Avvertenze hardware
+Il firmware è **sperimentale**, compilare non significa che display, touch e ghiera funzionino fisicamente. La denominazione del prodotto commerciale Waveshare non basta per garantire la coincidenza della revisione del controller LCD.
 
-Consulta la [scheda ufficiale Waveshare](https://www.waveshare.com/wiki/ESP32-S3-Knob-Touch-LCD-1.8) e [hardware reference SH8601](https://github.com/amitn/knobcaster/blob/main/docs/01-hardware.md).
+**Non flashare questo BIN nel chip ESP32-U4WDH (ESP32 classico, 4MB flash).** Il dispositivo contiene un ESP32 secondario separato dall'ESP32-S3 principale. Nell'app di flashing devi controllare il rilevamento automatico del modello, non solo il valore del menu "Select Chip".
 
----
+Eseguire il backup del firmware originale prima di scrivere sull'ESP32-S3. Il firmware può essere inadatto a varianti SH8601; confermare il controller leggendo le specifiche esatte della revisione.
 
-# Magic Life
+## Build
+La GitHub Action `Compila Magic Life ESP32-S3` compila il codice e pubblica un archivio ZIP con:
+- `MagicLife_ESP32S3_FLASH_0x0.bin` — immagine unificata per offset `0x0`
+- `MagicLife_ESP32S3_APP_0x10000.bin` — sola applicazione per offset `0x10000`
+- `SHA256SUMS.txt`
 
-Segnapunti sperimentale Magic: The Gathering per Waveshare ESP32-S3 Knob Touch LCD 1.8.
+La variante ST77916 è basata sulla [libreria grafica adattata](https://github.com/juggernautwins608/Waveshare-1.8-Magic-the-Gathering-Life-Counter).
 
-Funzioni: modalità 1 e 2 giocatori, 20/40 vite, touch e ghiera. Verificare modello esatto e salvare firmware originale prima del flash.
+## Recupero
+Se il menu originale è ancora visibile, non è una prova che il chip secondario ESP32 sia intatto: significa solo che la parte del dispositivo necessaria al menu originale sta funzionando. Non cancellare altre memorie senza prima identificare il chip.
+
