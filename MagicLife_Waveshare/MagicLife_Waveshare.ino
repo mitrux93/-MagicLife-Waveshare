@@ -23,8 +23,8 @@
 Arduino_DataBus *bus = new Arduino_ESP32QSPI(LCD_CS,LCD_CLK,LCD_D0,LCD_D1,LCD_D2,LCD_D3);
 Arduino_GFX *lcd = new Arduino_ST77916(bus,LCD_RST,0,true,360,360);
 Preferences prefs;
-const uint16_t BG=0x1083, PANEL=0x2128, WHITE=0xffff, MUTED=0xad75;
-const uint16_t BLUE=0x367d, ORANGE=0xfcc5, GREEN=0x65ef, RED=0xf3a7, EDGE=0x426d;
+const uint16_t ML_BG=0x1083, ML_PANEL=0x2128, ML_WHITE=0xffff, ML_MUTED=0xad75;
+const uint16_t ML_BLUE=0x367d, ML_ORANGE=0xfcc5, ML_GREEN=0x65ef, ML_RED=0xf3a7, ML_EDGE=0x426d;
 uint8_t players=1, initialLife=40, selected=0;
 int16_t life[2]={40,40};
 bool game=false, redraw=true, changed=false, touchLast=false;
@@ -35,46 +35,46 @@ void IRAM_ATTR tickA(){uint32_t n=micros();if(n-pulseA>3500){turns++;pulseA=n;}}
 void IRAM_ATTR tickB(){uint32_t n=micros();if(n-pulseB>3500){turns--;pulseB=n;}}
 void txt(const char*s,int x,int y,int z,uint16_t c){lcd->setTextSize(z);lcd->setTextColor(c);lcd->setCursor(x,y);lcd->print(s);}
 void center(const char*s,int y,int z,uint16_t c){txt(s,180-(int)strlen(s)*3*z,y,z,c);}
-void button(int x,int y,int w,int h,const char*s,int z,uint16_t bg,uint16_t fg=WHITE){
+void button(int x,int y,int w,int h,const char*s,int z,uint16_t bg,uint16_t fg=ML_WHITE){
  lcd->fillRoundRect(x,y,w,h,11,bg);
  txt(s,x+w/2-(int)strlen(s)*3*z,y+(h-8*z)/2,z,fg);
 }
 void control(int x,int y,bool plus,uint16_t c){
- lcd->fillCircle(x,y,29,PANEL);lcd->drawCircle(x,y,29,c);
- lcd->fillRoundRect(x-13,y-3,26,6,2,WHITE);
- if(plus)lcd->fillRoundRect(x-3,y-13,6,26,2,WHITE);
+ lcd->fillCircle(x,y,29,ML_PANEL);lcd->drawCircle(x,y,29,c);
+ lcd->fillRoundRect(x-13,y-3,26,6,2,ML_WHITE);
+ if(plus)lcd->fillRoundRect(x-3,y-13,6,26,2,ML_WHITE);
 }
 void bigNum(int n,int y,int z,uint16_t color){
  char s[12];snprintf(s,sizeof(s),"%d",n);
  center(s,y,z,color);
 }
-void base(){lcd->fillScreen(BG);lcd->drawCircle(180,180,175,EDGE);}
+void base(){lcd->fillScreen(ML_BG);lcd->drawCircle(180,180,175,ML_EDGE);}
 void menu(){
- base();center("MAGIC LIFE",44,3,WHITE);
- center("GIOCATORI",101,2,MUTED);
- button(65,131,108,48,"1",3,players==1?BLUE:PANEL);
- button(187,131,108,48,"2",3,players==2?ORANGE:PANEL);
- center("VITE INIZIALI",201,2,MUTED);
- button(86,228,82,43,"20",2,initialLife==20?BLUE:PANEL);
- button(192,228,82,43,"40",2,initialLife==40?BLUE:PANEL);
- button(103,290,154,43,"INIZIA",2,GREEN,BG);
+ base();center("MAGIC LIFE",44,3,ML_WHITE);
+ center("GIOCATORI",101,2,ML_MUTED);
+ button(65,131,108,48,"1",3,players==1?ML_BLUE:ML_PANEL);
+ button(187,131,108,48,"2",3,players==2?ML_ORANGE:ML_PANEL);
+ center("VITE INIZIALI",201,2,ML_MUTED);
+ button(86,228,82,43,"20",2,initialLife==20?ML_BLUE:ML_PANEL);
+ button(192,228,82,43,"40",2,initialLife==40?ML_BLUE:ML_PANEL);
+ button(103,290,154,43,"INIZIA",2,ML_GREEN,ML_BG);
 }
 void one(){
- base();center("MAGIC LIFE",52,2,MUTED);
- center("GIOCATORE 1",92,2,BLUE);
- bigNum(life[0],159,8,life[0]<=0?RED:WHITE);
- control(53,194,false,RED);control(307,194,true,GREEN);
- center("GHIERA: VITE",260,2,MUTED);
- button(124,298,112,35,"MENU",2,PANEL);
+ base();center("MAGIC LIFE",52,2,ML_MUTED);
+ center("GIOCATORE 1",92,2,ML_BLUE);
+ bigNum(life[0],159,8,life[0]<=0?ML_RED:ML_WHITE);
+ control(53,194,false,ML_RED);control(307,194,true,ML_GREEN);
+ center("GHIERA: VITE",260,2,ML_MUTED);
+ button(124,298,112,35,"MENU",2,ML_PANEL);
 }
 void two(){
- base();center("P1",31,3,selected==0?WHITE:BLUE);
- bigNum(life[0],94,5,life[0]<=0?RED:BLUE);
- control(61,110,false,BLUE);control(299,110,true,BLUE);
- button(134,162,92,35,"MENU",2,PANEL);
- center("P2",211,3,selected==1?WHITE:ORANGE);
- bigNum(life[1],272,5,life[1]<=0?RED:ORANGE);
- control(61,288,false,ORANGE);control(299,288,true,ORANGE);
+ base();center("P1",31,3,selected==0?ML_WHITE:ML_BLUE);
+ bigNum(life[0],94,5,life[0]<=0?ML_RED:ML_BLUE);
+ control(61,110,false,ML_BLUE);control(299,110,true,ML_BLUE);
+ button(134,162,92,35,"MENU",2,ML_PANEL);
+ center("P2",211,3,selected==1?ML_WHITE:ML_ORANGE);
+ bigNum(life[1],272,5,life[1]<=0?ML_RED:ML_ORANGE);
+ control(61,288,false,ML_ORANGE);control(299,288,true,ML_ORANGE);
 }
 void save(){
  prefs.putUChar("players",players);prefs.putUChar("initial",initialLife);
