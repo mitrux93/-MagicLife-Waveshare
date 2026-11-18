@@ -1,0 +1,59 @@
+name: Compila Magic Knob OS v2 alpha
+on:
+  push:
+    branches: [feature/firmware-completo-v2]
+    paths:
+      - 'MagicKnobOS/**'
+      - '.github/workflows/build-v2.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: arduino/setup-arduino-cli@v2
+      - name: Installa ESP32 core 2.0.14
+        run: |
+          arduino-cli config init
+          arduino-cli core update-index --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+          arduino-cli core install esp32:esp32@2.0.14 --additional-urls https://espressif.github.io/arduino-esp32/package_esp32_index.json
+      - name: Prepara libreria display ST77916 V2
+        run: |
+          git clone --depth 1 https://github.com/juggernautwins608/Waveshare-1.8-Magic-the-Gathering-Life-Counter.git "$RUNNER_TEMP/mtg-display"
+          test -f "$RUNNER_TEMP/mtg-display/libraries/GFX_Library_for_Arduino/src/Arduino_GFX_Library.h"
+      - name: Compila firmware
+        run: |
+          arduino-cli compile \
+            --fqbn 'esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=huge_app,PSRAM=opi,CDCOnBoot=cdc' \
+            --libraries "$RUNNER_TEMP/mtg-display/libraries" \
+            --output-dir "$GITHUB_WORKSPACE/build" \
+            "$GITHUB_WORKSPACE/MagicKnobOS"
+          test -s build/MagicKnobOS.ino.bin
+          test -s build/MagicKnobOS.ino.bootloader.bin
+          test -s build/MagicKnobOS.ino.partitions.bin
+      - name: Unisci immagini flash
+        run: |
+          python3 -m pip install 'esptool==4.7.0'
+          mkdir -p firmware
+          BOOT_APP0="$HOME/.arduino15/packages/esp32/hardware/esp32/2.0.14/tools/partitions/boot_app0.bin"
+          test -s "$BOOT_APP0"
+          python3 -m esptool --chip esp32s3 merge_bin \
+            -o firmware/MagicKnobOS_v2alpha_ESP32S3_FLASH_0x0.bin \
+            --flash_mode dio --flash_freq 80m --flash_size 16MB \
+            0x0 build/MagicKnobOS.ino.bootloader.bin \
+            0x8000 build/MagicKnobOS.ino.partitions.bin \
+            0xe000 "$BOOT_APP0" \
+            0x10000 build/MagicKnobOS.ino.bin
+          cp build/MagicKnobOS.ino.bin firmware/MagicKnobOS_v2alpha_ESP32S3_APP_0x10000.bin
+          sha256sum firmware/*.bin > firmware/SHA256SUMS.txt
+      - name: Pubblica BIN scaricabile
+        uses: actions/upload-artifact@v4
+        with:
+          name: MagicKnobOS-v2alpha-ESP32S3-BIN
+          path: firmware/
+          if-no-files-found: error
+          retention-days: 14
