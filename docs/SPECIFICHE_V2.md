@@ -32,7 +32,7 @@ Il dispositivo Waveshare ESP32-S3-Knob-Touch-LCD-1.8 deve diventare un **multi-t
 
 ## Input / resa grafica
 - **Antiflicker**: disegno statico una volta; aggiornamento solo dei widget modificati, preferibilmente LVGL con flush a riquadri su PSRAM
-- **Encoder quadratura**: decodifica di entrambe le fasi A/B (GPIO8, GPIO7), evitando l'attuale ISR con +1 per A e -1 per B che può cancellare i movimenti
+- **Ghiera a impulsi separati**: GPIO8 e GPIO7 forniscono impulsi di rotazione distinti nei due versi secondo il progetto di riferimento; campionamento o interrupt con debounce per ogni ingresso; prova diagnostica dei conteggi reali
 - Direzione ghiera configurabile; moltiplicatore `1 vita/scatto` di default; passi per scatto calibrabili; filtraggio contro i rimbalzi; nessuna accelerazione di default
 - Click centrale (GPIO0) = seleziona; pressione prolungata = indietro/menu (da validare su hardware)
 - Feedback vibrazione opzionale sullo scatto, con forza configurabile; controlli touch +/-
@@ -55,7 +55,7 @@ Fonte: https://www.waveshare.com/wiki/ESP32-S3-Knob-Touch-LCD-1.8
 | Modulo | v1.x main | v2 obiettivo |
 | --- | --- | --- |
 | Magic 1/2 giocatori | parziale | completo |
-| Velocità ghiera bidirezionale | difettosa | decodifica quadratura verificata |
+| Velocità ghiera bidirezionale | difettosa | impulsi separati e debounce verificati |
 | Flicker | presente | eliminato |
 | Timer/orologio | assente | da implementare |
 | Foto/SD/TXT | assente | da implementare |
@@ -83,6 +83,7 @@ Fonte: https://www.waveshare.com/wiki/ESP32-S3-Knob-Touch-LCD-1.8
 
 ## Stato dei lavori
 - [x] Spec e architettura v2 isolate in branch dedicata, senza toccare la main
+- [x] Nucleo v2 alpha (launcher, Magic 1/2, contatori, dadi, timer e impostazioni) aggiunto nel ramo
 - [ ] Porting/validazione BSP LCD/encoder/touch su esemplare
 - [ ] Engine Magic avanzato e test
 - [ ] UI LVGL completa
