@@ -102,9 +102,9 @@ void newGame() {
 void drawHome(){
   base("MAGIC KNOB OS");centered("2.0 alpha",76,2,MK_FAINT);
   uiButton(90,111,180,54,"MAGIC",3,0x10c4);
-  uiButton(90,177,180,45,"STRUMENTI",2);
-  uiButton(90,232,180,45,"IMPOSTAZ.",2);
-  centered("Timer - dadi - sistema",299,1,MK_FAINT);
+  uiButton(90,174,180,42,"NUOVA",2);
+  uiButton(90,222,180,42,"STRUMENTI",2);
+  uiButton(90,271,180,42,"IMPOSTAZ.",2);
 }
 void drawSetup(){
   base("NUOVA PARTITA");
@@ -171,7 +171,7 @@ void drawCounters(){
   uiButton(91,190,47,39,"<",2);
   uiButton(222,190,47,39,">",2);
   uiButton(107,289,146,37,"PARTITA",2);
-  counterDirty=true;
+  redrawCounter();
 }
 void redrawCounter(){
   if(page!=COUNTERS)return;
@@ -271,8 +271,9 @@ bool near(int x,int y,int a,int b){long dx=x-a,dy=y-b;return dx*dx+dy*dy<=30L*30
 void touchAction(int x,int y){
   if(page==HOME){
     if(within(x,y,90,111,270,165))changePage(playing?GAME:SETUP);
-    else if(within(x,y,90,177,270,222))changePage(TOOLS);
-    else if(within(x,y,90,232,270,277))changePage(SETTINGS);
+    else if(within(x,y,90,174,270,216))changePage(SETUP);
+    else if(within(x,y,90,222,270,264))changePage(TOOLS);
+    else if(within(x,y,90,271,270,313))changePage(SETTINGS);
   } else if(page==SETUP){
     if(within(x,y,72,120,172,167)){players=1;fresh=true;markSaved();}
     else if(within(x,y,188,120,288,167)){players=2;fresh=true;markSaved();}
