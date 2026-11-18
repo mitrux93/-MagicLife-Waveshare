@@ -3,8 +3,10 @@
 #include <Wire.h>
 #include <Preferences.h>
 #include <esp_system.h>
+#include <driver/gpio.h>
+#include <string.h>
 
-// Magic Knob OS 2.0-alpha | Waveshare ESP32-S3-Knob-Touch-LCD-1.8
+// Magic Knob OS 2.0-alpha2 | UI, quadrature encoder, gesture support
 // Experimental firmware, NOT factory-complete. Do NOT flash to ESP32-U4WDH.
 // Patched ST77916 V2 library required, see GitHub Actions workflow.
 constexpr int PIN_CS=14, PIN_CLK=13, PIN_D0=15, PIN_D1=16, PIN_D2=17, PIN_D3=18;
@@ -17,31 +19,43 @@ Preferences store;
 constexpr uint16_t MK_DARK=0x0862, MK_PANEL=0x18e4, MK_PANEL2=0x2165, MK_GOLD=0xd587;
 constexpr uint16_t MK_FAINT=0x732d, MK_WHITE=0xf79e, MK_BLUE=0x3d9d, MK_AMBER=0xfbc5;
 constexpr uint16_t MK_RED=0xf2c5, MK_GREEN=0x5e0c;
-enum Page : uint8_t {HOME, SETUP, GAME, COUNTERS, TOOLS, TIMER, SETTINGS, DIAG};
+enum Page : uint8_t {HOME, SETUP, GAME, COUNTERS, TOOLS, ROLL, TIMER, SETTINGS, DIAG};
+enum RollType : uint8_t {ROLL_D6, ROLL_D20, ROLL_COIN};
+RollType rollType=ROLL_D20;
 Page page=HOME;
 enum CounterType : uint8_t {POISON, ENERGY, TAX, COMMANDER};
 CounterType selectedCounter=POISON;
 uint8_t players=2, startLife=40, selected=0, brightness=210;
-uint8_t knobDivider=1;
+uint8_t knobDivider=4;
 bool invertKnob=false, playing=false, fresh=true, lifeDirty=false, selectionDirty=false, counterDirty=false;
 int16_t life[2]={40,40}, poison[2]={0,0}, energy[2]={0,0}, tax[2]={0,0}, cmdDamage[2]={0,0};
 uint32_t lastChange=0, lastTouch=0, lastDiagnostics=0;
-bool needsSave=false, lastDown=false;
+bool needsSave=false;
 volatile int32_t knobDelta=0;
-volatile uint32_t rawA=0, rawB=0, edgeA=0, edgeB=0;
+volatile uint32_t rawA=0, rawB=0;
+volatile uint8_t encoderPrev=0;
 int32_t pulseAccumulator=0;
+bool touchActive=false, swipeAlreadyHandled=false;
+int touchStartX=0, touchStartY=0, touchEndX=0, touchEndY=0;
+uint32_t touchStartMs=0, lastReleaseMs=0;
+uint8_t absentTouchSamples=0;
 bool timerRunning=false;
 uint32_t mkTimerStartedAt=0, timerElapsed=0;
 uint32_t randomValue=0;
 char toolResult[24]="Pronto";
 
-void IRAM_ATTR knobA() {
-  uint32_t now=micros();
-  if((uint32_t)(now-edgeA)>=1000) { edgeA=now; rawA++; knobDelta++; }
-}
-void IRAM_ATTR knobB() {
-  uint32_t now=micros();
-  if((uint32_t)(now-edgeB)>=1000) { edgeB=now; rawB++; knobDelta--; }
+// Quadrature: count valid transitions of both phases, reject bounce/reversal pairs.
+// Previous rising-edge-only ISR could cancel clockwise movements.
+void IRAM_ATTR knobEdge() {
+  const uint8_t current=(gpio_get_level((gpio_num_t)PIN_A)<<1) | gpio_get_level((gpio_num_t)PIN_B);
+  const uint8_t previous=encoderPrev;
+  if(current==previous)return;
+  if((current ^ previous) == 2) rawA++;
+  else if((current ^ previous) == 1) rawB++;
+  const uint8_t transition=(previous<<2)|current;
+  if(transition==1 || transition==7 || transition==14 || transition==8) knobDelta++;
+  else if(transition==2 || transition==11 || transition==13 || transition==4) knobDelta--;
+  encoderPrev=current;
 }
 void markSaved() {needsSave=true; lastChange=millis();}
 void printAt(const char *s,int x,int y,int scale,uint16_t c) {
@@ -58,14 +72,19 @@ void uiButton(int x,int y,int w,int h,const char *s,int scale=2,uint16_t color=M
 }
 void base(const char *title) {
   lcd->fillScreen(MK_DARK);
-  lcd->drawCircle(180,180,176,MK_GOLD);lcd->drawCircle(180,180,173,MK_PANEL2);
+  lcd->drawCircle(180,180,176,MK_GOLD);
+  lcd->drawCircle(180,180,172,MK_PANEL2);
+  lcd->drawCircle(180,180,164,MK_PANEL);
+  lcd->drawFastHLine(100,26,160,MK_PANEL2);
+  lcd->drawFastHLine(100,330,160,MK_PANEL2);
   centered(title,37,2,MK_GOLD);
-  lcd->drawFastHLine(83,64,194,MK_PANEL2);
+  lcd->drawFastHLine(93,64,174,MK_PANEL2);
+  if(page!=HOME)centered("SWIPE > HOME",342,1,MK_FAINT);
 }
 void changePage(Page next) {page=next;fresh=true;lifeDirty=true;selectionDirty=true;counterDirty=true;}
 void persist() {
   store.putUChar("players",players);store.putUChar("initial",startLife);
-  store.putUChar("bright",brightness);store.putUChar("step",knobDivider);
+  store.putUChar("bright",brightness);store.putUChar("edges",knobDivider);
   store.putBool("reverse",invertKnob);store.putBool("playing",playing);
   for(int p=0;p<2;p++){
     String suffix=String(p);
@@ -82,7 +101,7 @@ void load() {
   players=store.getUChar("players",2)==1?1:2;
   startLife=store.getUChar("initial",40)==20?20:40;
   brightness=constrain(store.getUChar("bright",210),40,255);
-  knobDivider=constrain(store.getUChar("step",1),1,4);
+  knobDivider=constrain((int)store.getUChar("edges",4),2,8);
   invertKnob=store.getBool("reverse",false);
   playing=store.getBool("playing",false);
   for(int p=0;p<2;p++){
@@ -100,7 +119,7 @@ void newGame() {
   selected=0;playing=true;markSaved();changePage(GAME);
 }
 void drawHome(){
-  base("MAGIC KNOB OS");centered("2.0 alpha",76,2,MK_FAINT);
+  base("MAGIC KNOB OS");centered("2.0 ALPHA 2",77,2,MK_FAINT);
   uiButton(90,111,180,54,"MAGIC",3,0x10c4);
   uiButton(90,174,180,42,"NUOVA",2);
   uiButton(90,222,180,42,"STRUMENTI",2);
@@ -185,8 +204,28 @@ void drawTools() {
   uiButton(189,103,106,54,"D20",3);
   uiButton(81,173,198,44,"MONETA",2);
   uiButton(81,227,198,44,"TIMER",2);
-  uiButton(107,291,146,38,"INDIETRO",2);
-  centered(toolResult,277,1,MK_GOLD);
+  uiButton(107,291,146,38,"HOME",2);
+}
+// Big dedicated result page: tap the main area to reroll, swipe to Home.
+void throwTool() {
+  if(rollType==ROLL_D6)randomValue=(esp_random()%6)+1;
+  else if(rollType==ROLL_D20)randomValue=(esp_random()%20)+1;
+  else randomValue=esp_random()&1;
+  fresh=true;
+}
+void drawRoll() {
+  base(rollType==ROLL_D6?"DADO D6":rollType==ROLL_D20?"DADO D20":"MONETA");
+  lcd->drawCircle(180,172,104,MK_GOLD);
+  lcd->drawCircle(180,172,98,MK_PANEL2);
+  char result[20];
+  if(rollType==ROLL_COIN){
+    strcpy(result,randomValue?"TESTA":"CROCE");
+    centered(result,146,5,MK_WHITE);
+  } else {
+    snprintf(result,sizeof(result),"%lu",(unsigned long)randomValue);
+    centered(result,115,12,MK_WHITE);
+  }
+  uiButton(100,278,160,44,"RILANCIA",2);
 }
 void drawTimer(){
   base("CRONOMETRO");
@@ -207,7 +246,7 @@ void drawSettings(){
   uiButton(243,115,52,37,"+",2);
   centered("Direzione ghiera",169,2,MK_FAINT);
   uiButton(78,192,204,37,invertKnob?"INVERTITA":"NORMALE",2);
-  centered("Impulsi per vita",239,2,MK_FAINT);
+  centered("Fasi per vita (4 tip.)",239,1,MK_FAINT);
   uiButton(68,267,56,37,"-",2);
   uiButton(238,267,56,37,"+",2);
   centered("<< MENU",316,1,MK_GOLD);
@@ -241,7 +280,7 @@ void render(){
   switch(page) {
     case HOME:drawHome();break;case SETUP:drawSetup();break;
     case GAME:drawGame();break;case COUNTERS:drawCounters();break;
-    case TOOLS:drawTools();break;case TIMER:drawTimer();break;
+    case TOOLS:drawTools();break;case ROLL:drawRoll();break;case TIMER:drawTimer();break;
     case SETTINGS:drawSettings();settingsValues();break;
     case DIAG:drawDiagnostics();redrawDiagnostics();break;
   }
@@ -304,11 +343,14 @@ void touchAction(int x,int y){
     else if(within(x,y,222,190,269,229)){selectedCounter=(CounterType)((selectedCounter+1)%4);fresh=true;}
     else if(within(x,y,107,289,253,326))changePage(GAME);
   } else if(page==TOOLS){
-    if(within(x,y,65,103,171,157)){randomValue=esp_random()%6+1;snprintf(toolResult,sizeof(toolResult),"D6: %lu",(unsigned long)randomValue);fresh=true;}
-    else if(within(x,y,189,103,295,157)){randomValue=esp_random()%20+1;snprintf(toolResult,sizeof(toolResult),"D20: %lu",(unsigned long)randomValue);fresh=true;}
-    else if(within(x,y,81,173,279,217)){snprintf(toolResult,sizeof(toolResult),"%s",(esp_random()&1)?"TESTA":"CROCE");fresh=true;}
+    if(within(x,y,65,103,171,157)){rollType=ROLL_D6;throwTool();changePage(ROLL);}
+    else if(within(x,y,189,103,295,157)){rollType=ROLL_D20;throwTool();changePage(ROLL);}
+    else if(within(x,y,81,173,279,217)){rollType=ROLL_COIN;throwTool();changePage(ROLL);}
     else if(within(x,y,81,227,279,271))changePage(TIMER);
     else if(within(x,y,107,291,253,329))changePage(HOME);
+  } else if(page==ROLL){
+    if(within(x,y,80,275,280,325)||within(x,y,75,78,285,267))throwTool();
+    else if(y>325)changePage(TOOLS);
   } else if(page==TIMER){
     if(within(x,y,79,204,281,247)){
       if(timerRunning){timerElapsed+=millis()-mkTimerStartedAt;timerRunning=false;}
@@ -320,8 +362,8 @@ void touchAction(int x,int y){
     if(within(x,y,65,115,117,152)){brightness=max(40,(int)brightness-15);setBrightness();markSaved();settingsValues();}
     else if(within(x,y,243,115,295,152)){brightness=min(255,(int)brightness+15);setBrightness();markSaved();settingsValues();}
     else if(within(x,y,78,192,282,229)){invertKnob=!invertKnob;markSaved();fresh=true;}
-    else if(within(x,y,68,267,124,304)){knobDivider=max(1,(int)knobDivider-1);markSaved();settingsValues();}
-    else if(within(x,y,238,267,294,304)){knobDivider=min(4,(int)knobDivider+1);markSaved();settingsValues();}
+    else if(within(x,y,68,267,124,304)){knobDivider=max(2,(int)knobDivider-1);markSaved();settingsValues();}
+    else if(within(x,y,238,267,294,304)){knobDivider=min(8,(int)knobDivider+1);markSaved();settingsValues();}
     else if(y>312){changePage(HOME);}
     else if(y>75&&y<110){changePage(DIAG);}
   } else if(page==DIAG){
@@ -329,17 +371,25 @@ void touchAction(int x,int y){
   }
 }
 void setup(){
-  Serial.begin(115200);delay(100);load();
+  Serial.begin(115200);delay(260);load();
+  pinMode(PIN_BL,OUTPUT);digitalWrite(PIN_BL,LOW);
   pinMode(PIN_A,INPUT_PULLUP);pinMode(PIN_B,INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(PIN_A),knobA,RISING);
-  attachInterrupt(digitalPinToInterrupt(PIN_B),knobB,RISING);
+  encoderPrev=(digitalRead(PIN_A)<<1)|digitalRead(PIN_B);
+  attachInterrupt(digitalPinToInterrupt(PIN_A),knobEdge,CHANGE);
+  attachInterrupt(digitalPinToInterrupt(PIN_B),knobEdge,CHANGE);
   Wire.begin(PIN_SDA,PIN_SCL);Wire.setClock(400000);
-  pinMode(PIN_TPRST,OUTPUT);digitalWrite(PIN_TPRST,LOW);delay(20);
-  digitalWrite(PIN_TPRST,HIGH);delay(130);
-  ledcSetup(0,50000,8);ledcAttachPin(PIN_BL,0);setBrightness();
-  if(!lcd->begin(40000000)){Serial.println("LCD init failed");return;}
+  pinMode(PIN_TPRST,OUTPUT);digitalWrite(PIN_TPRST,LOW);delay(35);
+  digitalWrite(PIN_TPRST,HIGH);delay(150);
+  // Force a hardware LCD reset on warm USB/RTS boot; not only on power cycle.
+  pinMode(PIN_RST,OUTPUT);digitalWrite(PIN_RST,LOW);delay(60);
+  digitalWrite(PIN_RST,HIGH);delay(150);
+  bool ok=lcd->begin(40000000);
+  if(!ok){Serial.println("LCD init failed");return;}
   lcd->setRotation(0);
   randomSeed(esp_random());fresh=true;
+  render(); // draw first frame while backlight remains off
+  ledcSetup(0,50000,8);ledcAttachPin(PIN_BL,0);
+  setBrightness();
 }
 void loop(){
   noInterrupts();int32_t amount=knobDelta;knobDelta=0;interrupts();
@@ -349,7 +399,7 @@ void loop(){
     if(abs(pulseAccumulator)>=knobDivider){
       int step=pulseAccumulator/knobDivider;
       pulseAccumulator-=(step*knobDivider);
-      step=constrain(step,-12,12);
+      step=constrain(step,-30,30);
       if(page==GAME)adjustLife(players==1?0:selected,step);
       else if(page==COUNTERS)adjustCounter(step);
       else if(page==SETTINGS){
@@ -359,10 +409,32 @@ void loop(){
     }
   }
   static uint32_t touchPoll=0;
-  if(millis()-touchPoll>25){
+  if(millis()-touchPoll>16){
     touchPoll=millis();int x,y;bool down=readTouch(x,y);
-    if(down&&!lastDown&&millis()-lastTouch>120){touchAction(x,y);lastTouch=millis();}
-    lastDown=down;
+    if(down){
+      absentTouchSamples=0;
+      if(!touchActive){
+        touchActive=true;swipeAlreadyHandled=false;
+        touchStartX=touchEndX=x;touchStartY=touchEndY=y;
+        touchStartMs=millis();
+      }else{
+        touchEndX=x;touchEndY=y;
+        int dx=touchEndX-touchStartX,dy=touchEndY-touchStartY;
+        if(page!=HOME && !swipeAlreadyHandled && touchStartX<=115 &&
+           dx>=100 && abs(dy)<=75 && millis()-touchStartMs<=1200) {
+          swipeAlreadyHandled=true;
+          changePage(HOME);
+        }
+      }
+    }else if(touchActive && ++absentTouchSamples>=2){
+      touchActive=false;absentTouchSamples=0;
+      int dx=touchEndX-touchStartX,dy=touchEndY-touchStartY;
+      if(!swipeAlreadyHandled && abs(dx)<28 && abs(dy)<28 &&
+         millis()-touchStartMs<1000 && millis()-lastReleaseMs>100){
+        touchAction(touchStartX,touchStartY);
+      }
+      lastReleaseMs=millis();
+    }
   }
   if(fresh)render();
   else {
