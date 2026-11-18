@@ -6,7 +6,7 @@
 #include <driver/gpio.h>
 #include <string.h>
 
-// Magic Knob OS 2.0-alpha2 | UI, two-direction pulse encoder, swipe support
+// Magic Knob OS 2.0-alpha3 | centered counters, settings hub, battery monitor
 // Experimental firmware, NOT factory-complete. Do NOT flash to ESP32-U4WDH.
 // Patched ST77916 V2 library required, see GitHub Actions workflow.
 constexpr int PIN_CS=14, PIN_CLK=13, PIN_D0=15, PIN_D1=16, PIN_D2=17, PIN_D3=18;
@@ -19,7 +19,7 @@ Preferences store;
 constexpr uint16_t MK_DARK=0x0862, MK_PANEL=0x18e4, MK_PANEL2=0x2165, MK_GOLD=0xd587;
 constexpr uint16_t MK_FAINT=0x732d, MK_WHITE=0xf79e, MK_BLUE=0x3d9d, MK_AMBER=0xfbc5;
 constexpr uint16_t MK_RED=0xf2c5, MK_GREEN=0x5e0c;
-enum Page : uint8_t {HOME, SETUP, GAME, COUNTERS, TOOLS, ROLL, TIMER, SETTINGS, DIAG};
+enum Page : uint8_t {HOME, SETUP, GAME, COUNTERS, TOOLS, ROLL, TIMER, SETTINGS, DISPLAY_SETTINGS, KNOB_SETTINGS, BATTERY, DIAG};
 enum RollType : uint8_t {ROLL_D6, ROLL_D20, ROLL_COIN};
 RollType rollType=ROLL_D20;
 Page page=HOME;
@@ -30,6 +30,9 @@ uint8_t knobDivider=1;
 bool invertKnob=false, playing=false, fresh=true, lifeDirty=false, selectionDirty=false, counterDirty=false;
 int16_t life[2]={40,40}, poison[2]={0,0}, energy[2]={0,0}, tax[2]={0,0}, cmdDamage[2]={0,0};
 uint32_t lastChange=0, lastTouch=0, lastDiagnostics=0;
+uint32_t lastBatteryRead=0;
+float batteryVolts=0.0f;
+bool batterySampleValid=false;
 bool needsSave=false;
 volatile int32_t knobDelta=0;
 volatile uint32_t rawA=0, rawB=0;
@@ -116,12 +119,40 @@ void load() {
   }
 }
 void setBrightness(){ledcWrite(0,brightness);}
+// GPIO1 is wired through an approximately 2:1 voltage divider.
+// This measures the monitored rail, which may be USB-biased; never
+// present USB-biased voltage as a precise battery state of charge.
+void sampleBattery(bool force=false){
+  if(!force && (uint32_t)(millis()-lastBatteryRead)<2200)return;
+  lastBatteryRead=millis();
+  uint32_t total=0;
+  for(int i=0;i<10;i++){total+=(uint32_t)analogReadMilliVolts(PIN_BAT);delayMicroseconds(140);}
+  float measured=0.002f*(float(total)/10.0f);
+  if(!isfinite(measured) || measured<0.0f || measured>6.5f){
+    batterySampleValid=false;return;
+  }
+  batterySampleValid=true;
+  if(batteryVolts<=0.05f)batteryVolts=measured;
+  else batteryVolts=batteryVolts*0.65f+measured*0.35f;
+}
+int batteryPercentApprox(float voltage){
+  // Very approximate LiPo open-circuit state of charge: not a fuel gauge.
+  const float v[]={3.35f,3.50f,3.60f,3.70f,3.80f,3.90f,4.00f,4.10f,4.20f};
+  const int p[]={0,8,15,25,45,60,75,90,100};
+  if(voltage<=v[0])return 0;
+  if(voltage>=v[8])return 100;
+  for(int i=1;i<9;i++){
+    if(voltage<=v[i])
+      return (int)(p[i-1]+(p[i]-p[i-1])*(voltage-v[i-1])/(v[i]-v[i-1]));
+  }
+  return 100;
+}
 void newGame() {
   for(int i=0;i<2;i++){life[i]=startLife;poison[i]=0;energy[i]=0;tax[i]=0;cmdDamage[i]=0;}
   selected=0;playing=true;markSaved();changePage(GAME);
 }
 void drawHome(){
-  base("MAGIC KNOB OS");centered("2.0 ALPHA 2",77,2,MK_FAINT);
+  base("MAGIC KNOB OS");centered("2.0 ALPHA 3",77,2,MK_FAINT);
   uiButton(90,111,180,54,"MAGIC",3,0x10c4);
   uiButton(90,174,180,42,"NUOVA",2);
   uiButton(90,222,180,42,"STRUMENTI",2);
@@ -184,21 +215,30 @@ int16_t &currentCounter() {
     case TAX:return tax[p];default:return cmdDamage[p];}
 }
 void drawCounters(){
-  base("CONTATORI");
-  centered("P1/P2: tocchi per scegliere",75,1,MK_FAINT);
-  uiButton(65,98,110,39,selected==0?"[P1]":" P1 ",2,selected==0?MK_BLUE:MK_PANEL);
-  if(players==2)uiButton(185,98,110,39,selected==1?"[P2]":" P2 ",2,selected==1?MK_AMBER:MK_PANEL);
-  centered(counterName(),150,2,MK_GOLD);
-  uiButton(91,190,47,39,"<",2);
-  uiButton(222,190,47,39,">",2);
-  uiButton(107,289,146,37,"PARTITA",2);
+  base("SEGNALINI");
+  centered("SCEGLI GIOCATORE",75,1,MK_FAINT);
+  uiButton(65,94,110,39,selected==0?"[P1]":" P1 ",2,selected==0?MK_BLUE:MK_PANEL);
+  if(players==2)uiButton(185,94,110,39,selected==1?"[P2]":" P2 ",2,selected==1?MK_AMBER:MK_PANEL);
+  uiButton(68,157,42,34,"<",2);
+  uiButton(250,157,42,34,">",2);
+  centered(counterName(),164,2,MK_GOLD);
+  lcd->drawCircle(180,234,61,MK_GOLD);
+  lcd->drawCircle(180,234,58,MK_PANEL2);
+  plusMinus(78,234,false,MK_RED);
+  plusMinus(282,234,true,MK_GREEN);
+  uiButton(111,290,138,36,"PARTITA",2);
   redrawCounter();
 }
 void redrawCounter(){
   if(page!=COUNTERS)return;
-  lcd->fillRect(135,185,90,94,MK_DARK);
+  // Clear only the digit box; don't touch the gold ring or +/- controls.
+  lcd->fillRect(138,198,84,73,MK_DARK);
   char buf[16];snprintf(buf,sizeof(buf),"%d",currentCounter());
-  centered(buf,239,4,currentCounter()>=10&&selectedCounter==POISON?MK_RED:MK_WHITE);
+  const int digits=(int)strlen(buf);
+  const int size=digits==1?8:(digits==2?6:4);
+  const int x=180-(digits*6*size)/2;
+  const int y=234-(8*size)/2;
+  printAt(buf,x,y,size,currentCounter()>=10&&selectedCounter==POISON?MK_RED:MK_WHITE);
 }
 void drawTools() {
   base("STRUMENTI MTG");
@@ -243,22 +283,74 @@ void repaintTimer(){
 }
 void drawSettings(){
   base("IMPOSTAZIONI");
-  centered("Luminosita",92,2,MK_FAINT);
-  uiButton(65,115,52,37,"-",2);
-  uiButton(243,115,52,37,"+",2);
-  centered("Direzione ghiera",169,2,MK_FAINT);
-  uiButton(78,192,204,37,invertKnob?"INVERTITA":"NORMALE",2);
-  centered("Impulsi per vita",239,2,MK_FAINT);
-  uiButton(68,267,56,37,"-",2);
-  uiButton(238,267,56,37,"+",2);
-  centered("<< MENU",316,1,MK_GOLD);
+  uiButton(80,92,200,43,"SCHERMO",2);
+  uiButton(80,146,200,43,"GHIERA",2);
+  uiButton(80,200,200,43,"BATTERIA",2);
+  uiButton(80,254,200,43,"DIAGNOSTICA",2);
 }
-void settingsValues(){
-  if(page!=SETTINGS)return;
-  char s[12];lcd->fillRect(138,114,84,42,MK_DARK);
-  snprintf(s,sizeof(s),"%u",brightness);centered(s,127,2,MK_WHITE);
-  lcd->fillRect(142,264,76,44,MK_DARK);
-  snprintf(s,sizeof(s),"%u",knobDivider);centered(s,275,2,MK_WHITE);
+void drawDisplaySettings(){
+  base("SCHERMO");
+  centered("LUMINOSITA",107,2,MK_FAINT);
+  uiButton(78,163,62,52,"-",3);
+  uiButton(220,163,62,52,"+",3);
+  char buf[16];snprintf(buf,sizeof(buf),"%u",brightness);
+  centered(buf,175,2,MK_WHITE);
+  centered("40-255: intensita luce",247,1,MK_FAINT);
+  uiButton(109,280,142,37,"INDIETRO",2);
+}
+void displayValues(){
+  if(page!=DISPLAY_SETTINGS)return;
+  lcd->fillRect(144,164,73,54,MK_DARK);
+  char buf[16];snprintf(buf,sizeof(buf),"%u",brightness);
+  centered(buf,177,2,MK_WHITE);
+}
+void drawKnobSettings(){
+  base("GHIERA");
+  centered("DIREZIONE",87,2,MK_FAINT);
+  uiButton(80,115,200,42,invertKnob?"INVERTITA":"NORMALE",2);
+  centered("SENSIBILITA GHIERA",174,2,MK_FAINT);
+  uiButton(76,207,60,48,"-",3);
+  uiButton(224,207,60,48,"+",3);
+  char buf[8];snprintf(buf,sizeof(buf),"%u",knobDivider);
+  centered(buf,216,4,MK_GOLD);
+  centered("1 impulso = 1 punto vita",265,1,MK_FAINT);
+  uiButton(111,291,138,36,"INDIETRO",2);
+}
+void knobValues(){
+  if(page!=KNOB_SETTINGS)return;
+  lcd->fillRect(145,207,70,52,MK_DARK);
+  char buf[8];snprintf(buf,sizeof(buf),"%u",knobDivider);
+  centered(buf,217,4,MK_GOLD);
+}
+void drawBattery(){
+  base("BATTERIA");
+  centered("MISURA TENSIONE",95,2,MK_FAINT);
+  uiButton(106,285,148,37,"INDIETRO",2);
+  // Readout is refreshed independently without clearing the whole display.
+  updateBatteryDisplay();
+}
+void updateBatteryDisplay(){
+  if(page!=BATTERY)return;
+  lcd->fillRect(64,126,232,148,MK_DARK);
+  char buf[32];
+  if(!batterySampleValid){
+    centered("NON DISPONIBILE",159,2,MK_AMBER);
+    centered("Controllare il sensore",226,1,MK_FAINT);
+    return;
+  }
+  snprintf(buf,sizeof(buf),"%.2f V",batteryVolts);
+  centered(buf,150,4,MK_WHITE);
+  if(batteryVolts>4.35f){
+    centered("LETTURA USB?",210,2,MK_AMBER);
+    centered("Carica non misurabile",240,1,MK_FAINT);
+  }else if(batteryVolts<2.7f){
+    centered("VALORE NON VALIDO",210,2,MK_RED);
+    centered("Batteria assente?",240,1,MK_FAINT);
+  }else{
+    snprintf(buf,sizeof(buf),"~%d%% (stima)",batteryPercentApprox(batteryVolts));
+    centered(buf,210,2,MK_GOLD);
+    centered("Verificare senza USB",240,1,MK_FAINT);
+  }
 }
 void drawDiagnostics(){
   base("DIAGNOSTICA");
@@ -272,18 +364,20 @@ void redrawDiagnostics(){
   lcd->fillRect(93,145,175,118,MK_DARK);
   char s[40];snprintf(s,sizeof(s),"A: %lu",(unsigned long)a);centered(s,153,2,MK_BLUE);
   snprintf(s,sizeof(s),"B: %lu",(unsigned long)b);centered(s,185,2,MK_AMBER);
-  analogReadResolution(12);
-  float v=analogReadMilliVolts(PIN_BAT)*0.002f;
-  if(v>4.4f)snprintf(s,sizeof(s),"USB/ADC: %.1fV",v);
-  else snprintf(s,sizeof(s),"VBAT: %.2fV",v);
-  centered(s,225,1,MK_FAINT);
+  if(batterySampleValid){
+    snprintf(s,sizeof(s),"ADC x2: %.2f V",batteryVolts);
+    centered(s,225,1,MK_FAINT);
+  }
 }
 void render(){
   switch(page) {
     case HOME:drawHome();break;case SETUP:drawSetup();break;
     case GAME:drawGame();break;case COUNTERS:drawCounters();break;
     case TOOLS:drawTools();break;case ROLL:drawRoll();break;case TIMER:drawTimer();break;
-    case SETTINGS:drawSettings();settingsValues();break;
+    case SETTINGS:drawSettings();break;
+    case DISPLAY_SETTINGS:drawDisplaySettings();break;
+    case KNOB_SETTINGS:drawKnobSettings();break;
+    case BATTERY:drawBattery();break;
     case DIAG:drawDiagnostics();redrawDiagnostics();break;
   }
   fresh=false;lifeDirty=false;selectionDirty=false;counterDirty=false;
@@ -339,11 +433,13 @@ void touchAction(int x,int y){
       else if(y>225&&y<325){selected=1;selectionDirty=true;}
     }
   } else if(page==COUNTERS){
-    if(within(x,y,65,98,175,137)){selected=0;fresh=true;}
-    else if(players==2&&within(x,y,185,98,295,137)){selected=1;fresh=true;}
-    else if(within(x,y,91,190,138,229)){selectedCounter=(CounterType)((selectedCounter+3)%4);fresh=true;}
-    else if(within(x,y,222,190,269,229)){selectedCounter=(CounterType)((selectedCounter+1)%4);fresh=true;}
-    else if(within(x,y,107,289,253,326))changePage(GAME);
+    if(within(x,y,65,94,175,133)){selected=0;fresh=true;}
+    else if(players==2&&within(x,y,185,94,295,133)){selected=1;fresh=true;}
+    else if(within(x,y,68,157,110,191)){selectedCounter=(CounterType)((selectedCounter+3)%4);fresh=true;}
+    else if(within(x,y,250,157,292,191)){selectedCounter=(CounterType)((selectedCounter+1)%4);fresh=true;}
+    else if(near(x,y,78,234))adjustCounter(-1);
+    else if(near(x,y,282,234))adjustCounter(1);
+    else if(within(x,y,111,290,249,326))changePage(GAME);
   } else if(page==TOOLS){
     if(within(x,y,65,103,171,157)){rollType=ROLL_D6;throwTool();changePage(ROLL);}
     else if(within(x,y,189,103,295,157)){rollType=ROLL_D20;throwTool();changePage(ROLL);}
@@ -361,19 +457,30 @@ void touchAction(int x,int y){
     }else if(within(x,y,92,262,172,300)){timerRunning=false;timerElapsed=0;fresh=true;}
     else if(within(x,y,188,262,268,300))changePage(TOOLS);
   } else if(page==SETTINGS){
-    if(within(x,y,65,115,117,152)){brightness=max(40,(int)brightness-15);setBrightness();markSaved();settingsValues();}
-    else if(within(x,y,243,115,295,152)){brightness=min(255,(int)brightness+15);setBrightness();markSaved();settingsValues();}
-    else if(within(x,y,78,192,282,229)){invertKnob=!invertKnob;markSaved();fresh=true;}
-    else if(within(x,y,68,267,124,304)){knobDivider=max(1,(int)knobDivider-1);markSaved();settingsValues();}
-    else if(within(x,y,238,267,294,304)){knobDivider=min(4,(int)knobDivider+1);markSaved();settingsValues();}
-    else if(y>312){changePage(HOME);}
-    else if(y>75&&y<110){changePage(DIAG);}
+    if(within(x,y,80,92,280,135))changePage(DISPLAY_SETTINGS);
+    else if(within(x,y,80,146,280,189))changePage(KNOB_SETTINGS);
+    else if(within(x,y,80,200,280,243))changePage(BATTERY);
+    else if(within(x,y,80,254,280,297))changePage(DIAG);
+  } else if(page==DISPLAY_SETTINGS){
+    if(within(x,y,78,163,140,215)){brightness=max(40,(int)brightness-15);setBrightness();markSaved();displayValues();}
+    else if(within(x,y,220,163,282,215)){brightness=min(255,(int)brightness+15);setBrightness();markSaved();displayValues();}
+    else if(within(x,y,109,280,251,317))changePage(SETTINGS);
+  } else if(page==KNOB_SETTINGS){
+    if(within(x,y,80,115,280,157)){invertKnob=!invertKnob;markSaved();fresh=true;}
+    else if(within(x,y,76,207,136,255)){knobDivider=max(1,(int)knobDivider-1);markSaved();knobValues();}
+    else if(within(x,y,224,207,284,255)){knobDivider=min(4,(int)knobDivider+1);markSaved();knobValues();}
+    else if(within(x,y,111,291,249,327))changePage(SETTINGS);
+  } else if(page==BATTERY){
+    if(within(x,y,106,285,254,322))changePage(SETTINGS);
   } else if(page==DIAG){
     if(within(x,y,101,277,259,321))changePage(SETTINGS);
   }
 }
 void setup(){
   Serial.begin(115200);delay(260);load();
+  analogReadResolution(12);
+  analogSetPinAttenuation(PIN_BAT,ADC_11db);
+  sampleBattery(true);
   pinMode(PIN_BL,OUTPUT);digitalWrite(PIN_BL,LOW);
   pinMode(PIN_A,INPUT_PULLUP);pinMode(PIN_B,INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(PIN_A),knobClockwise,FALLING);
@@ -403,9 +510,9 @@ void loop(){
       step=constrain(step,-30,30);
       if(page==GAME)adjustLife(players==1?0:selected,step);
       else if(page==COUNTERS)adjustCounter(step);
-      else if(page==SETTINGS){
+      else if(page==DISPLAY_SETTINGS){
         brightness=constrain((int)brightness+step*5,40,255);
-        setBrightness();markSaved();settingsValues();
+        setBrightness();markSaved();displayValues();
       }
     }
   }
@@ -444,6 +551,11 @@ void loop(){
     else if(page==COUNTERS&&counterDirty){redrawCounter();counterDirty=false;}
     if(page==TIMER&&millis()-lastDiagnostics>300){lastDiagnostics=millis();repaintTimer();}
     if(page==DIAG&&millis()-lastDiagnostics>250){lastDiagnostics=millis();redrawDiagnostics();}
+  }
+  if(page==BATTERY && (uint32_t)(millis()-lastBatteryRead)>=2200) {
+    sampleBattery(true);updateBatteryDisplay();
+  } else if(page==DIAG) {
+    sampleBattery();
   }
   if(needsSave&&millis()-lastChange>1800)persist();
   delay(2);
