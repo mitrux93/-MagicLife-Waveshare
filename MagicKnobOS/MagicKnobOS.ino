@@ -221,7 +221,7 @@ void drawCounters(){
   if(players==2)uiButton(185,94,110,39,selected==1?"[P2]":" P2 ",2,selected==1?MK_AMBER:MK_PANEL);
   uiButton(68,157,42,34,"<",2);
   uiButton(250,157,42,34,">",2);
-  centered(counterName(),164,2,MK_GOLD);
+  centered(counterName(),145,2,MK_GOLD);
   lcd->drawCircle(180,234,61,MK_GOLD);
   lcd->drawCircle(180,234,58,MK_PANEL2);
   plusMinus(78,234,false,MK_RED);
@@ -313,7 +313,7 @@ void drawKnobSettings(){
   uiButton(224,207,60,48,"+",3);
   char buf[8];snprintf(buf,sizeof(buf),"%u",knobDivider);
   centered(buf,216,4,MK_GOLD);
-  centered("1 impulso = 1 punto vita",265,1,MK_FAINT);
+  centered("1 = massima sensibilita",265,1,MK_FAINT);
   uiButton(111,291,138,36,"INDIETRO",2);
 }
 void knobValues(){
