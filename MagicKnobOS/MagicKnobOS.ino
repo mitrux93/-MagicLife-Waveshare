@@ -6,7 +6,7 @@
 #include <driver/gpio.h>
 #include <string.h>
 
-// Magic Knob OS 2.0-alpha2 | UI, quadrature encoder, gesture support
+// Magic Knob OS 2.0-alpha2 | UI, two-direction pulse encoder, swipe support
 // Experimental firmware, NOT factory-complete. Do NOT flash to ESP32-U4WDH.
 // Patched ST77916 V2 library required, see GitHub Actions workflow.
 constexpr int PIN_CS=14, PIN_CLK=13, PIN_D0=15, PIN_D1=16, PIN_D2=17, PIN_D3=18;
@@ -26,14 +26,14 @@ Page page=HOME;
 enum CounterType : uint8_t {POISON, ENERGY, TAX, COMMANDER};
 CounterType selectedCounter=POISON;
 uint8_t players=2, startLife=40, selected=0, brightness=210;
-uint8_t knobDivider=4;
+uint8_t knobDivider=1;
 bool invertKnob=false, playing=false, fresh=true, lifeDirty=false, selectionDirty=false, counterDirty=false;
 int16_t life[2]={40,40}, poison[2]={0,0}, energy[2]={0,0}, tax[2]={0,0}, cmdDamage[2]={0,0};
 uint32_t lastChange=0, lastTouch=0, lastDiagnostics=0;
 bool needsSave=false;
 volatile int32_t knobDelta=0;
 volatile uint32_t rawA=0, rawB=0;
-volatile uint8_t encoderPrev=0;
+volatile uint32_t lastPulseA=0, lastPulseB=0;
 int32_t pulseAccumulator=0;
 bool touchActive=false, swipeAlreadyHandled=false;
 int touchStartX=0, touchStartY=0, touchEndX=0, touchEndY=0;
@@ -44,18 +44,20 @@ uint32_t mkTimerStartedAt=0, timerElapsed=0;
 uint32_t randomValue=0;
 char toolResult[24]="Pronto";
 
-// Quadrature: count valid transitions of both phases, reject bounce/reversal pairs.
-// Previous rising-edge-only ISR could cancel clockwise movements.
-void IRAM_ATTR knobEdge() {
-  const uint8_t current=(gpio_get_level((gpio_num_t)PIN_A)<<1) | gpio_get_level((gpio_num_t)PIN_B);
-  const uint8_t previous=encoderPrev;
-  if(current==previous)return;
-  if((current ^ previous) == 2) rawA++;
-  else if((current ^ previous) == 1) rawB++;
-  const uint8_t transition=(previous<<2)|current;
-  if(transition==1 || transition==7 || transition==14 || transition==8) knobDelta++;
-  else if(transition==2 || transition==11 || transition==13 || transition==4) knobDelta--;
-  encoderPrev=current;
+// Two independent active-low direction contacts, NOT a quadrature encoder.
+// GPIO8 = clockwise; GPIO7 = anticlockwise (user can reverse in Settings).
+// FALLING ISR catches short pulses that the main loop can miss.
+// Separate short dead-time per pin suppresses contact bounce.
+constexpr uint32_t PULSE_DEBOUNCE_US=2400;
+void IRAM_ATTR knobClockwise() {
+  uint32_t t=micros();
+  if((uint32_t)(t-lastPulseA)<PULSE_DEBOUNCE_US)return;
+  lastPulseA=t;rawA++;knobDelta++;
+}
+void IRAM_ATTR knobCounterclockwise() {
+  uint32_t t=micros();
+  if((uint32_t)(t-lastPulseB)<PULSE_DEBOUNCE_US)return;
+  lastPulseB=t;rawB++;knobDelta--;
 }
 void markSaved() {needsSave=true; lastChange=millis();}
 void printAt(const char *s,int x,int y,int scale,uint16_t c) {
@@ -84,7 +86,7 @@ void base(const char *title) {
 void changePage(Page next) {page=next;fresh=true;lifeDirty=true;selectionDirty=true;counterDirty=true;}
 void persist() {
   store.putUChar("players",players);store.putUChar("initial",startLife);
-  store.putUChar("bright",brightness);store.putUChar("edges",knobDivider);
+  store.putUChar("bright",brightness);store.putUChar("pulseDiv",knobDivider);
   store.putBool("reverse",invertKnob);store.putBool("playing",playing);
   for(int p=0;p<2;p++){
     String suffix=String(p);
@@ -101,7 +103,7 @@ void load() {
   players=store.getUChar("players",2)==1?1:2;
   startLife=store.getUChar("initial",40)==20?20:40;
   brightness=constrain(store.getUChar("bright",210),40,255);
-  knobDivider=constrain((int)store.getUChar("edges",4),2,8);
+  knobDivider=constrain((int)store.getUChar("pulseDiv",1),1,4);
   invertKnob=store.getBool("reverse",false);
   playing=store.getBool("playing",false);
   for(int p=0;p<2;p++){
@@ -246,7 +248,7 @@ void drawSettings(){
   uiButton(243,115,52,37,"+",2);
   centered("Direzione ghiera",169,2,MK_FAINT);
   uiButton(78,192,204,37,invertKnob?"INVERTITA":"NORMALE",2);
-  centered("Fasi per vita (4 tip.)",239,1,MK_FAINT);
+  centered("Impulsi per vita",239,2,MK_FAINT);
   uiButton(68,267,56,37,"-",2);
   uiButton(238,267,56,37,"+",2);
   centered("<< MENU",316,1,MK_GOLD);
@@ -362,8 +364,8 @@ void touchAction(int x,int y){
     if(within(x,y,65,115,117,152)){brightness=max(40,(int)brightness-15);setBrightness();markSaved();settingsValues();}
     else if(within(x,y,243,115,295,152)){brightness=min(255,(int)brightness+15);setBrightness();markSaved();settingsValues();}
     else if(within(x,y,78,192,282,229)){invertKnob=!invertKnob;markSaved();fresh=true;}
-    else if(within(x,y,68,267,124,304)){knobDivider=max(2,(int)knobDivider-1);markSaved();settingsValues();}
-    else if(within(x,y,238,267,294,304)){knobDivider=min(8,(int)knobDivider+1);markSaved();settingsValues();}
+    else if(within(x,y,68,267,124,304)){knobDivider=max(1,(int)knobDivider-1);markSaved();settingsValues();}
+    else if(within(x,y,238,267,294,304)){knobDivider=min(4,(int)knobDivider+1);markSaved();settingsValues();}
     else if(y>312){changePage(HOME);}
     else if(y>75&&y<110){changePage(DIAG);}
   } else if(page==DIAG){
@@ -374,9 +376,8 @@ void setup(){
   Serial.begin(115200);delay(260);load();
   pinMode(PIN_BL,OUTPUT);digitalWrite(PIN_BL,LOW);
   pinMode(PIN_A,INPUT_PULLUP);pinMode(PIN_B,INPUT_PULLUP);
-  encoderPrev=(digitalRead(PIN_A)<<1)|digitalRead(PIN_B);
-  attachInterrupt(digitalPinToInterrupt(PIN_A),knobEdge,CHANGE);
-  attachInterrupt(digitalPinToInterrupt(PIN_B),knobEdge,CHANGE);
+  attachInterrupt(digitalPinToInterrupt(PIN_A),knobClockwise,FALLING);
+  attachInterrupt(digitalPinToInterrupt(PIN_B),knobCounterclockwise,FALLING);
   Wire.begin(PIN_SDA,PIN_SCL);Wire.setClock(400000);
   pinMode(PIN_TPRST,OUTPUT);digitalWrite(PIN_TPRST,LOW);delay(35);
   digitalWrite(PIN_TPRST,HIGH);delay(150);
