@@ -31,7 +31,7 @@ volatile int32_t knobDelta=0;
 volatile uint32_t rawA=0, rawB=0, edgeA=0, edgeB=0;
 int32_t pulseAccumulator=0;
 bool timerRunning=false;
-uint32_t timerStarted=0, timerElapsed=0;
+uint32_t mkTimerStartedAt=0, timerElapsed=0;
 uint32_t randomValue=0;
 char toolResult[24]="Pronto";
 
@@ -196,7 +196,7 @@ void drawTimer(){
 }
 void repaintTimer(){
   if(page!=TIMER)return;
-  uint32_t val=timerElapsed+(timerRunning?millis()-timerStarted:0);
+  uint32_t val=timerElapsed+(timerRunning?millis()-mkTimerStartedAt:0);
   char s[20];snprintf(s,sizeof(s),"%02lu:%02lu",(unsigned long)((val/60000)%100),(unsigned long)((val/1000)%60));
   lcd->fillRect(93,116,174,62,MK_DARK);centered(s,126,4,MK_GOLD);
 }
@@ -311,8 +311,8 @@ void touchAction(int x,int y){
     else if(within(x,y,107,291,253,329))changePage(HOME);
   } else if(page==TIMER){
     if(within(x,y,79,204,281,247)){
-      if(timerRunning){timerElapsed+=millis()-timerStarted;timerRunning=false;}
-      else{timerStarted=millis();timerRunning=true;}
+      if(timerRunning){timerElapsed+=millis()-mkTimerStartedAt;timerRunning=false;}
+      else{mkTimerStartedAt=millis();timerRunning=true;}
       fresh=true;
     }else if(within(x,y,92,262,172,300)){timerRunning=false;timerElapsed=0;fresh=true;}
     else if(within(x,y,188,262,268,300))changePage(TOOLS);
