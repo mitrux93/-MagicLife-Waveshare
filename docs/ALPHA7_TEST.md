@@ -4,7 +4,7 @@
 
 ## Layout 3 giocatori — tutti visibili
 Tre pannelli:
-- P1 al centro in alto (x97–263, y76–176)
+- P1 al centro in alto (x97–263, y72–163)
 - P2 in basso a sinistra (x47–171, y196–294)
 - P3 in basso a destra (x189–313, y196–294)
 - Pulsante circolare MENU al centro (180,184), in area non occupata dai numeri.
