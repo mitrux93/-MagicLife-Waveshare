@@ -6,7 +6,7 @@
 #include <driver/gpio.h>
 #include <string.h>
 
-// Magic Knob OS 2.0-alpha4 | dual-player HUD, KO animation, confirmed reset
+// Magic Knob OS 2.0-alpha4.1 | optimized input-to-display latency
 // Experimental firmware, NOT factory-complete. Do NOT flash to ESP32-U4WDH.
 // Patched ST77916 V2 library required, see GitHub Actions workflow.
 constexpr int PIN_CS=14, PIN_CLK=13, PIN_D0=15, PIN_D1=16, PIN_D2=17, PIN_D3=18;
@@ -40,6 +40,8 @@ uint32_t lastChange=0, lastTouch=0, lastDiagnostics=0;
 uint32_t lastBatteryRead=0;
 float batteryVolts=0.0f;
 bool batterySampleValid=false;
+uint32_t lastLifePaintAt=0;
+uint32_t lastSelectionPaintAt=0;
 bool needsSave=false;
 volatile int32_t knobDelta=0;
 volatile uint32_t rawA=0, rawB=0;
@@ -166,7 +168,7 @@ void newGame() {
   selected=0;playing=true;markSaved();changePage(GAME);
 }
 void drawHome(){
-  base("MAGIC KNOB OS");centered("2.0 ALPHA 4",77,2,MK_FAINT);
+  base("MAGIC KNOB OS");centered("2.0 ALPHA 4.1",77,2,MK_FAINT);
   uiButton(90,111,180,54,"MAGIC",3,0x10c4);
   uiButton(90,174,180,42,"NUOVA",2);
   uiButton(90,222,180,42,"STRUMENTI",2);
@@ -223,8 +225,9 @@ void lifeArea(int p){
     return;
   }
   const int y=p==0?109:249;
-  // The KO outline and number are inside this small reusable region.
-  lcd->fillRoundRect(106,y,148,58,12,MK_PANEL);
+  // Only refresh the rectangular text area, not the rounded panel every pulse.
+  // This avoids expensive full-widget fills while turning the knob quickly.
+  lcd->fillRect(115,y+4,130,50,MK_PANEL);
   int digits=strlen(buf);
   int size=digits<=2?6:(digits==3?5:4);
   int x=180-(digits*6*size)/2;
@@ -232,10 +235,15 @@ void lifeArea(int p){
   uint16_t color=life[p]<=0?MK_RED:
                  life[p]<=5?MK_GOLD:(p==0?MK_BLUE:MK_AMBER);
   printAt(buf,x,baseline,size,color);
-  if(life[p]<=0){
-    lcd->drawRoundRect(106,y,148,58,12,MK_RED);
+  lcd->drawRoundRect(106,y,148,58,12,life[p]<=0?MK_RED:MK_PANEL);
+  // Only touch the KO badge if the zero boundary changes. During ordinary
+  // life updates the badge is left as-is and no additional pixels are drawn.
+  static bool badgeShown[2]={false,false};
+  const bool shouldShow=life[p]<=0;
+  if(badgeShown[p]!=shouldShow){
+    knockoutBadge(p,MK_RED);
+    badgeShown[p]=shouldShow;
   }
-  knockoutBadge(p,MK_RED);
 }
 void paintSelection(){
   if(players!=2)return;
@@ -485,6 +493,7 @@ void adjustLife(int p,int change) {
   const int previous=life[p];
   const int updated=constrain(previous+change,-99,999);
   if(updated==previous)return;
+  const bool selectionChanged=(selected!=p);
   life[p]=updated;selected=p;
   // Trigger once on crossing >0 to <=0. Never trigger again below zero.
   if(previous>0 && updated<=0 && players==2){
@@ -494,7 +503,9 @@ void adjustLife(int p,int change) {
   }else if(updated>0){
     knockout[p].active=false;
   }
-  markSaved();lifeDirty=true;lifeDirtyMask|=(1<<p);selectionDirty=true;
+  markSaved();lifeDirty=true;lifeDirtyMask|=(1<<p);
+  // In Alpha 4 we redrew both focus frames on EVERY pulse; avoid that.
+  if(selectionChanged)selectionDirty=true;
 }
 void adjustCounter(int amount) {
   int16_t &c=currentCounter();
@@ -620,7 +631,8 @@ void loop(){
     if(abs(pulseAccumulator)>=knobDivider){
       int step=pulseAccumulator/knobDivider;
       pulseAccumulator-=(step*knobDivider);
-      step=constrain(step,-30,30);
+      // Keep every counted pulse, including those accumulated while the
+      // LCD is painting. Life limits are enforced inside adjustLife().
       if(page==GAME)adjustLife(players==1?0:selected,step);
       else if(page==COUNTERS)adjustCounter(step);
       else if(page==DISPLAY_SETTINGS){
@@ -660,12 +672,21 @@ void loop(){
   if(fresh)render();
   else {
     if(page==GAME){
-      if(lifeDirty){
-        if(lifeDirtyMask&0x01)lifeArea(0);
-        if(players==2 && (lifeDirtyMask&0x02))lifeArea(1);
+      // Coalesce bursts of encoder events into at most ~40 numeric updates/s.
+      // Encoder interrupts remain active and every step changes the model.
+      const uint32_t now=millis();
+      if(lifeDirty && (uint32_t)(now-lastLifePaintAt)>=25){
+        uint8_t mask=lifeDirtyMask;
         lifeDirty=false;lifeDirtyMask=0;
+        if(mask&0x01)lifeArea(0);
+        if(players==2 && (mask&0x02))lifeArea(1);
+        lastLifePaintAt=millis();
       }
-      if(selectionDirty){paintSelection();selectionDirty=false;}
+      if(selectionDirty){
+        // Only repaint labels when player focus actually changes.
+        paintSelection();selectionDirty=false;
+        lastSelectionPaintAt=millis();
+      }
       updateKOAnimations();
     }
     else if(page==COUNTERS&&counterDirty){redrawCounter();counterDirty=false;}
