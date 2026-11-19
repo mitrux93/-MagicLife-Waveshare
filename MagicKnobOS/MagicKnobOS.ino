@@ -914,16 +914,60 @@ void touchAction(int x,int y){
       else if(within(x,y,99,215,260,311)){selected=1;markSaved();selectionDirty=true;}
       else if(y>=49&&y<=72)nextTurn();
     }
+
   } else if(page==GAME_MENU){
-    if(within(x,y,59,93,171,138))changePage(TOOLS);
-    else if(within(x,y,187,93,299,138)){
+    if(within(x,y,59,76,171,116))changePage(COMMANDER_DAMAGE);
+    else if(within(x,y,187,76,299,116)){historyOffset=0;changePage(HISTORY);}
+    else if(within(x,y,59,127,171,167))changePage(TOOLS);
+    else if(within(x,y,187,127,299,167))changePage(GAME_STATUS);
+    else if(within(x,y,59,178,171,218))nextTurn();
+    else if(within(x,y,187,178,299,218)){
       firstCandidate=(uint8_t)(esp_random()%players);changePage(FIRST_PLAYER);
-    }else if(within(x,y,59,150,171,195))nextTurn();
-    else if(within(x,y,187,150,299,195))changePage(GAME_STATUS);
-    else if(within(x,y,59,207,171,252))undoLast();
-    else if(within(x,y,187,207,299,252))changePage(RESET_CONFIRM);
-    else if(within(x,y,59,264,171,309))changePage(HOME);
-    else if(within(x,y,187,264,299,309))changePage(GAME);
+    }else if(within(x,y,59,229,171,269))undoLast();
+    else if(within(x,y,187,229,299,269))changePage(RESET_CONFIRM);
+    else if(within(x,y,59,280,171,320))changePage(HOME);
+    else if(within(x,y,187,280,299,320))changePage(GAME);
+  } else if(page==COMMANDER_DAMAGE){
+    if(y>=94&&y<=126){
+      for(int p=0;p<players;p++)if(within(x,y,36+p*74,94,104+p*74,126)){
+        commanderSource=p;
+        if(!partnerEnabled[p])commanderSlot=0;
+        if(players>1&&commanderTarget==commanderSource)
+          commanderTarget=(commanderSource+1)%players;
+        fresh=true;break;
+      }
+    }else if(within(x,y,56,137,174,172)){
+      if(partnerEnabled[commanderSource])commanderSlot=1-commanderSlot;
+      else commanderSlot=0;
+      fresh=true;
+    }else if(within(x,y,187,137,305,172)){
+      bool canDisable=true;
+      if(partnerEnabled[commanderSource]){
+        for(int t=0;t<4;t++)if(commanderMatrix[commanderSource][1][t]!=0)canDisable=false;
+      }
+      if(canDisable){
+        partnerEnabled[commanderSource]=!partnerEnabled[commanderSource];
+        if(!partnerEnabled[commanderSource])commanderSlot=0;
+        markSaved();fresh=true;
+      }
+    }else if(y>=195&&y<=227){
+      for(int p=0;p<players;p++)if(within(x,y,36+p*74,195,104+p*74,227)){
+        commanderTarget=p;fresh=true;break;
+      }
+    }else if(near(x,y,70,264))adjustCommanderDamage(-1);
+    else if(near(x,y,290,264))adjustCommanderDamage(1);
+    else if(within(x,y,99,310,261,340)){
+      commanderAutoLife=!commanderAutoLife;markSaved();fresh=true;
+    }
+  } else if(page==HISTORY){
+    if(within(x,y,61,284,174,315)){
+      int maximum=historySize>HISTORY_ROWS?historySize-HISTORY_ROWS:0;
+      historyOffset=constrain((int)historyOffset+HISTORY_ROWS,0,maximum);
+      fresh=true;
+    }else if(within(x,y,186,284,299,315)){
+      historyOffset=max(0,(int)historyOffset-HISTORY_ROWS);
+      fresh=true;
+    }else if(within(x,y,117,317,243,345))changePage(GAME_MENU);
   } else if(page==GAME_STATUS){
     int w=players==1?100:69,gap=players==1?0:6;
     int left=(360-(players*w+(players-1)*gap))/2;
@@ -933,9 +977,15 @@ void touchAction(int x,int y){
           selected=p;markSaved();fresh=true;break;
         }
     }else if(within(x,y,96,178,264,216)){
-      monarchOwner=(monarchOwner==selected)?255:selected;markSaved();fresh=true;
+      uint8_t before=monarchOwner;
+      monarchOwner=(monarchOwner==selected)?255:selected;
+      recordEvent(EV_MONARCH,selected,selected,0,before,monarchOwner);
+      markSaved();fresh=true;
     }else if(within(x,y,96,247,264,285)){
-      initiativeOwner=(initiativeOwner==selected)?255:selected;markSaved();fresh=true;
+      uint8_t before=initiativeOwner;
+      initiativeOwner=(initiativeOwner==selected)?255:selected;
+      recordEvent(EV_INITIATIVE,selected,selected,0,before,initiativeOwner);
+      markSaved();fresh=true;
     }else if(within(x,y,110,297,250,331))changePage(GAME);
   } else if(page==RESET_CONFIRM){
     if(within(x,y,65,224,173,275))changePage(GAME);
@@ -1027,7 +1077,7 @@ void setup(){
   bool ok=lcd->begin(40000000);
   if(!ok){Serial.println("LCD init failed");return;}
   lcd->setRotation(0);
-  randomSeed(esp_random());turnStartedAt=millis();fresh=true;
+  randomSeed(esp_random());turnStartedAt=millis();gameStartedAt=millis();fresh=true;
   render(); // draw first frame while backlight remains off
   ledcSetup(0,50000,8);ledcAttachPin(PIN_BL,0);
   setBrightness();
@@ -1044,6 +1094,12 @@ void loop(){
       // LCD is painting. Life limits are enforced inside adjustLife().
       if(page==GAME)adjustLife(selected,step);
       else if(page==COUNTERS)adjustCounter(step);
+      else if(page==COMMANDER_DAMAGE)adjustCommanderDamage(step);
+      else if(page==HISTORY){
+        int maximum=historySize>HISTORY_ROWS?historySize-HISTORY_ROWS:0;
+        historyOffset=constrain((int)historyOffset+step,0,maximum);
+        fresh=true;
+      }
       else if(page==FIRST_PLAYER){
         firstCandidate=(uint8_t)(((int)firstCandidate+step%players+players)%players);
         fresh=true;
