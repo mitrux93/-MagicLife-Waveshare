@@ -103,6 +103,7 @@ bool netReady=false,netPaired=false,netDirty=false,netError=false;
 uint8_t netRemoteMac[6]={};
 NetPacket netLastSnapshot={};
 NetState netLocalBackup={};
+UndoRecord netUndoBackup={};
 bool netBackupValid=false;
 portMUX_TYPE netMux=portMUX_INITIALIZER_UNLOCKED;
 IncomingNetPacket netQueue[4]={};
@@ -158,7 +159,7 @@ bool netSend(NetMsgType type,const uint8_t* addr,uint32_t sequence,bool includeS
   if(includeState)packet.state=netCaptureState();
   esp_err_t err=esp_now_send(addr,(const uint8_t*)&packet,sizeof(packet));
   if(type==NET_STATE && err==ESP_OK)netLastSnapshot=packet;
-  if(err!=ESP_OK)netError=true;
+  netError=(err!=ESP_OK);
   return err==ESP_OK;
 }
 void netStop(){
@@ -172,6 +173,7 @@ void netStop(){
   portEXIT_CRITICAL(&netMux);
   if(restore){
     netApplyState(netLocalBackup);
+    lastUndo=netUndoBackup;
     netBackupValid=false;
   }
 }
@@ -180,6 +182,7 @@ bool netStart(NetRole role){
   netStop();
   if(role==NET_VIEWER){
     netLocalBackup=netCaptureState();
+    netUndoBackup=lastUndo;
     netBackupValid=true;
   }
   WiFi.mode(WIFI_STA);
@@ -298,7 +301,7 @@ void netPoll(){
   for(int i=0;i<4&&netPacketPop(item);i++)netHandlePacket(item);
   const uint32_t now=millis();
   if(netRole==NET_HOST){
-    if(!netLastBeaconSent||(uint32_t)(now-netLastBeaconSent)>=1200){
+    if(!netPaired && (!netLastBeaconSent||(uint32_t)(now-netLastBeaconSent)>=1200)){
       netLastBeaconSent=now;netSend(NET_BEACON,NET_BROADCAST,0,false);
     }
     if(netPaired && (netDirty||
@@ -438,7 +441,8 @@ void base(const char *title) {
   lcd->drawFastHLine(100,330,160,MK_PANEL2);
   centered(title,37,2,MK_GOLD);
   lcd->drawFastHLine(93,64,174,MK_PANEL2);
-  if(page!=HOME)centered(netRole==NET_VIEWER?"TOCCA: RETE":"SWIPE > HOME",342,1,MK_FAINT);
+  if(page!=HOME&&page!=NETWORK)
+    centered(netRole==NET_VIEWER?"TOCCA: RETE":"SWIPE > HOME",342,1,MK_FAINT);
 }
 void changePage(Page next) {
   if(next!=GAME)for(auto &fx:knockout)fx.active=false;
@@ -1095,13 +1099,17 @@ void drawNetwork(){
   const uint16_t value=netRole==NET_HOST?netPin:netEntry;
   for(int i=0;i<4;i++){
     int div=i==0?1000:(i==1?100:(i==2?10:1));
-    char b[2];snprintf(b,sizeof(b),"%u",(value/div)%10);
+    char b[2];
+    if(netRole==NET_OFF && netChoice==NET_HOST)strcpy(b,"-");
+    else snprintf(b,sizeof(b),"%u",(value/div)%10);
     int x=77+i*52;
     uint16_t c=(netRole==NET_OFF&&netChoice==NET_VIEWER&&netDigit==i)?MK_GOLD:MK_PANEL2;
     uiButton(x,156,46,42,b,3,c);
   }
   uiButton(69,207,74,34,"-",3);
   uiButton(217,207,74,34,"+",3);
+  centered(netRole==NET_OFF&&netChoice==NET_VIEWER?"TOCCA CIFRA, POI +/-":
+           "CODICE: DOPO AVVIO",245,1,MK_FAINT);
   uiButton(100,254,160,41,netRole==NET_OFF?"AVVIA":"FERMA",2,
            netRole==NET_OFF?MK_GREEN:MK_RED);
   char msg[48];
