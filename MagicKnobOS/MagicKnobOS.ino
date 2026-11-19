@@ -430,19 +430,23 @@ void drawSplitCard(int p){
   snprintf(b,sizeof(b),"V%d E%d T%d",poison[p],energy[p],tax[p]);
   printAt(b,x+(w-(int)strlen(b)*6)/2,y+82,1,MK_FAINT);
 }
+void drawSplitMenu(){
+  // Repaint this after a card update: card corners overlap its circular edge.
+  lcd->fillCircle(180,184,25,MK_DARK);
+  lcd->drawCircle(180,184,24,MK_GOLD);
+  printAt("MENU",168,180,1,MK_GOLD);
+}
 void drawSplitGame(){
   base("MAGIC LIFE");
   if(players==4)lcd->drawFastVLine(180,75,229,MK_PANEL2);
   lcd->drawFastHLine(53,184,254,MK_PANEL2);
   for(int p=0;p<players;p++)drawSplitCard(p);
   paintedSplitSelected=selected;
-  lcd->fillCircle(180,184,25,MK_DARK);
-  lcd->drawCircle(180,184,24,MK_GOLD);
-  printAt("MENU",168,180,1,MK_GOLD);
+  drawSplitMenu();
 }
 void lifeArea(int p){
   char buf[16];snprintf(buf,sizeof(buf),"%d",life[p]);
-  if(players>=3){drawSplitCard(p);return;}
+  if(players>=3){drawSplitCard(p);drawSplitMenu();return;}
   if(players!=2){
     if(p!=selected)return;
     // Update both large life total and the selected player's overview chip.
@@ -481,6 +485,7 @@ void paintSelection(){
       drawSplitCard(paintedSplitSelected);
     drawSplitCard(selected);
     paintedSplitSelected=selected;
+    drawSplitMenu();
     return;
   }
   if(players!=2)return;
