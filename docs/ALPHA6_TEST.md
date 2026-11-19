@@ -14,8 +14,8 @@ Fonte esplicita Partner: https://magic.wizards.com/en/news/feature/commander-201
 - Selezionare **CMD A**, oppure abilitare **PARTNER SI** per passare fra **CMD A/B**. Partner è configurato per giocatore.
 - Selezionare in basso **P1–P4** = giocatore che subisce i danni, compreso il proprietario nei casi insoliti.
 - Il numero centrale indica danni da combattimento totali ricevuti **da quella singola fonte**. Usare +/- oppure la ghiera.
-- **VITA AUTO SI/NO**: quando SI, una variazione di +N danni sottrae N vite al bersaglio e la correzione di -N ne restituisce N. Quando NO, non modifica le vite (utile se il danno era già stato sottratto). Il cambio SI/NO vale sulle modifiche successive.
-- A 21+ compare KO CMD. Nella partita a 2 il bersaglio riceve un badge KO; nel riepilogo partita appare l'avviso.
+- **VITE SI/NO**: quando SI, una variazione di +N danni sottrae N vite al bersaglio e la correzione di -N ne restituisce N. Quando NO, non modifica le vite (utile se il danno era già stato sottratto). Il cambio SI/NO vale sulle modifiche successive.
+- A 21+ compare KO CMD. Nella partita a 2 il bersaglio riceve un badge KO; nella vista a 1/3/4 giocatori la sua tessera diventa rossa. La schermata Commander include un pulsante MENU per tornare alla partita.
 - Non è consentito disattivare Partner se esiste danno registrato del comandante B: evita che un record attivo diventi invisibile.
 
 ## Salvataggi e retrocompatibilità
@@ -33,7 +33,7 @@ Fonte esplicita Partner: https://magic.wizards.com/en/news/feature/commander-201
 3. Attiva Partner per P1. Seleziona CMD B, bersaglio P2; aggiungi 16. Atteso P1B→P2 = 16, P1A→P2 resta 5; nessun KO da comandante perché 5+16 provengono da fonti diverse. Se VITA AUTO SI, vita P2 scende a 19.
 4. Torna su CMD A e aggiungi 16: P1A→P2 = 21. Atteso avviso KO CMD pur con vita residua 3.
 5. Premi MENU > ANNULLA dopo una singola modifica a Commander. Verifica che ripristini sia danno che vita. (L'annullamento riguarda **l'ultima modifica**, non l'intera serie di pressioni.)
-6. Prova VITA AUTO NO: aggiungi 1 danno e verifica che le vite non cambino; correggi -1 e controlla che restino inalterate.
+6. Prova VITE NO: aggiungi 1 danno e verifica che le vite non cambino; correggi -1 e controlla che restino inalterate.
 7. Cambia fonte P3 e bersaglio P4; il totale deve essere indipendente dai valori P1.
 8. Vai in MENU > STORICO. Verifica righe leggibili e ordine più recente → meno recente; scorri con la ghiera e coi pulsanti.
 9. Spegni e riaccendi: verifica danni Commander, Partner, vite e preferenza auto. La cronologia deve ripartire vuota.
