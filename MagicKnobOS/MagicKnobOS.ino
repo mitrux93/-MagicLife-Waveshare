@@ -498,32 +498,49 @@ void redrawCounter(){
   const int y=234-(8*size)/2;
   printAt(buf,x,y,size,currentCounter()>=10&&selectedCounter==POISON?MK_RED:MK_WHITE);
 }
-void drawTools() {
-  base("STRUMENTI MTG");
-  uiButton(65,103,106,54,"D6",3);
-  uiButton(189,103,106,54,"D20",3);
-  uiButton(81,173,198,44,"MONETA",2);
-  uiButton(81,227,198,44,"TIMER",2);
-  uiButton(107,291,146,38,"HOME",2);
+
+const char* rollName(){
+  switch(rollType){
+    case ROLL_D4:return "DADO D4";case ROLL_D6:return "DADO D6";
+    case ROLL_D8:return "DADO D8";case ROLL_D10:return "DADO D10";
+    case ROLL_D12:return "DADO D12";case ROLL_D20:return "DADO D20";
+    case ROLL_D100:return "DADO D100";default:return "MONETA";
+  }
 }
-// Big dedicated result page: tap the main area to reroll, swipe to Home.
+void drawTools() {
+  base("DADI E STRUMENTI");
+  const char* labels[9]={"D4","D6","D8","D10","D12","D20","D100","MONETA","TIMER"};
+  for(int i=0;i<9;i++){
+    int x=45+(i%3)*91,y=95+(i/3)*57;
+    uiButton(x,y,84,44,labels[i],i==7?1:2);
+  }
+  uiButton(110,286,140,40,"INDIETRO",1);
+}
 void throwTool() {
-  if(rollType==ROLL_D6)randomValue=(esp_random()%6)+1;
-  else if(rollType==ROLL_D20)randomValue=(esp_random()%20)+1;
-  else randomValue=esp_random()&1;
+  if(rollType==ROLL_COIN)randomValue=esp_random()&1;
+  else{
+    uint32_t sides=6;
+    switch(rollType){
+      case ROLL_D4:sides=4;break;case ROLL_D6:sides=6;break;
+      case ROLL_D8:sides=8;break;case ROLL_D10:sides=10;break;
+      case ROLL_D12:sides=12;break;case ROLL_D20:sides=20;break;
+      case ROLL_D100:sides=100;break;default:break;
+    }
+    randomValue=(esp_random()%sides)+1;
+  }
   fresh=true;
 }
 void drawRoll() {
-  base(rollType==ROLL_D6?"DADO D6":rollType==ROLL_D20?"DADO D20":"MONETA");
+  base(rollName());
   lcd->drawCircle(180,172,104,MK_GOLD);
   lcd->drawCircle(180,172,98,MK_PANEL2);
   char result[20];
   if(rollType==ROLL_COIN){
     strcpy(result,randomValue?"TESTA":"CROCE");
     centered(result,146,5,MK_WHITE);
-  } else {
+  }else{
     snprintf(result,sizeof(result),"%lu",(unsigned long)randomValue);
-    centered(result,115,12,MK_WHITE);
+    centered(result,126,strlen(result)>=3?9:12,MK_WHITE);
   }
   uiButton(100,278,160,44,"RILANCIA",2);
 }
@@ -582,35 +599,25 @@ void knobValues(){
   char buf[8];snprintf(buf,sizeof(buf),"%u",knobDivider);
   centered(buf,173,3,MK_GOLD);
 }
+
 void drawBattery(){
-  base("BATTERIA");
-  centered("MISURA TENSIONE",95,2,MK_FAINT);
+  base("ALIMENTAZIONE");
+  centered("TENSIONE LINEA 5V",95,2,MK_FAINT);
   uiButton(106,285,148,37,"INDIETRO",2);
-  // Readout is refreshed independently without clearing the whole display.
   updateBatteryDisplay();
 }
 void updateBatteryDisplay(){
   if(page!=BATTERY)return;
-  lcd->fillRect(64,126,232,148,MK_DARK);
-  char buf[32];
+  lcd->fillRect(57,124,246,152,MK_DARK);
   if(!batterySampleValid){
-    centered("NON DISPONIBILE",159,2,MK_AMBER);
-    centered("Controllare il sensore",226,1,MK_FAINT);
+    centered("NON DISPONIBILE",156,2,MK_AMBER);
+    centered("Controllare il sensore",221,1,MK_FAINT);
     return;
   }
-  snprintf(buf,sizeof(buf),"%.2f V",batteryVolts);
+  char buf[32];snprintf(buf,sizeof(buf),"%.2f V",batteryVolts);
   centered(buf,150,4,MK_WHITE);
-  if(batteryVolts>4.35f){
-    centered("LETTURA USB?",210,2,MK_AMBER);
-    centered("Carica non misurabile",240,1,MK_FAINT);
-  }else if(batteryVolts<2.7f){
-    centered("VALORE NON VALIDO",210,2,MK_RED);
-    centered("Batteria assente?",240,1,MK_FAINT);
-  }else{
-    snprintf(buf,sizeof(buf),"~%d%% (stima)",batteryPercentApprox(batteryVolts));
-    centered(buf,210,2,MK_GOLD);
-    centered("Verificare senza USB",240,1,MK_FAINT);
-  }
+  centered("NON E' LA CARICA BATTERIA",214,1,MK_AMBER);
+  centered("Percentuale: non misurata",239,1,MK_FAINT);
 }
 void drawDiagnostics(){
   base("DIAGNOSTICA");
@@ -640,7 +647,11 @@ void redrawDiagnostics(){
 void render(){
   switch(page) {
     case HOME:drawHome();break;case SETUP:drawSetup();break;
-    case GAME:drawGame();break;case RESET_CONFIRM:drawResetConfirm();break;
+    case GAME:drawGame();break;
+    case GAME_MENU:drawGameMenu();break;
+    case FIRST_PLAYER:drawFirstPlayer();break;
+    case GAME_STATUS:drawGameStatus();break;
+    case RESET_CONFIRM:drawResetConfirm();break;
     case COUNTERS:drawCounters();break;
     case TOOLS:drawTools();break;case ROLL:drawRoll();break;case TIMER:drawTimer();break;
     case SETTINGS:drawSettings();break;
@@ -798,7 +809,7 @@ void setup(){
   bool ok=lcd->begin(40000000);
   if(!ok){Serial.println("LCD init failed");return;}
   lcd->setRotation(0);
-  randomSeed(esp_random());fresh=true;
+  randomSeed(esp_random());turnStartedAt=millis();fresh=true;
   render(); // draw first frame while backlight remains off
   ledcSetup(0,50000,8);ledcAttachPin(PIN_BL,0);
   setBrightness();
