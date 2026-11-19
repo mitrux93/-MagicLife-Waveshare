@@ -478,7 +478,7 @@ void render(){
     case BATTERY:drawBattery();break;
     case DIAG:drawDiagnostics();redrawDiagnostics();break;
   }
-  fresh=false;lifeDirty=false;selectionDirty=false;counterDirty=false;
+  fresh=false;lifeDirty=false;lifeDirtyMask=0;selectionDirty=false;counterDirty=false;
 }
 void adjustLife(int p,int change) {
   if(!playing||p>=players)return;
