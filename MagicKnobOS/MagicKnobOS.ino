@@ -6,7 +6,7 @@
 #include <driver/gpio.h>
 #include <string.h>
 
-// Magic Knob OS 2.0-alpha5 | MTG Commander UX: 1-4 seats, turns, first player, undo and game states
+// Magic Knob OS 2.0-alpha6 | per-source Commander damage, partners and session timeline
 // Experimental firmware, NOT factory-complete. Do NOT flash to ESP32-U4WDH.
 // Patched ST77916 V2 library required, see GitHub Actions workflow.
 constexpr int PIN_CS=14, PIN_CLK=13, PIN_D0=15, PIN_D1=16, PIN_D2=17, PIN_D3=18;
@@ -19,18 +19,24 @@ Preferences store;
 constexpr uint16_t MK_DARK=0x0862, MK_PANEL=0x18e4, MK_PANEL2=0x2165, MK_GOLD=0xd587;
 constexpr uint16_t MK_FAINT=0x732d, MK_WHITE=0xf79e, MK_BLUE=0x3d9d, MK_AMBER=0xfbc5;
 constexpr uint16_t MK_RED=0xf2c5, MK_GREEN=0x5e0c;
-enum Page : uint8_t {HOME, SETUP, GAME, GAME_MENU, FIRST_PLAYER, GAME_STATUS, RESET_CONFIRM, COUNTERS, TOOLS, ROLL, TIMER, SETTINGS, DISPLAY_SETTINGS, KNOB_SETTINGS, BATTERY, DIAG};
+enum Page : uint8_t {HOME, SETUP, GAME, GAME_MENU, FIRST_PLAYER, GAME_STATUS, COMMANDER_DAMAGE, HISTORY, RESET_CONFIRM, COUNTERS, TOOLS, ROLL, TIMER, SETTINGS, DISPLAY_SETTINGS, KNOB_SETTINGS, BATTERY, DIAG};
 enum RollType : uint8_t {ROLL_D4, ROLL_D6, ROLL_D8, ROLL_D10, ROLL_D12, ROLL_D20, ROLL_D100, ROLL_COIN};
 RollType rollType=ROLL_D20;
 Page page=HOME;
-enum CounterType : uint8_t {POISON, ENERGY, TAX, COMMANDER, TREASURE, EXPERIENCE};
-constexpr uint8_t COUNTER_COUNT=6;
+enum CounterType : uint8_t {POISON, ENERGY, TAX, TREASURE, EXPERIENCE};
+constexpr uint8_t COUNTER_COUNT=5;
 CounterType selectedCounter=POISON;
 uint8_t players=2, startLife=40, selected=0, brightness=210;
 uint8_t activeTurn=0, firstCandidate=0, monarchOwner=255, initiativeOwner=255;
 uint32_t turnSteps=0, turnStartedAt=0, lastTurnPaintAt=0;
-enum UndoKind : uint8_t {UNDO_NONE, UNDO_LIFE, UNDO_COUNTER};
-struct UndoRecord { UndoKind kind=UNDO_NONE; uint8_t player=0, previousSelected=0; CounterType counter=POISON; int16_t before=0; };
+enum UndoKind : uint8_t {UNDO_NONE, UNDO_LIFE, UNDO_COUNTER, UNDO_COMMANDER};
+struct UndoRecord {
+  UndoKind kind=UNDO_NONE;
+  uint8_t player=0, previousSelected=0, source=0, target=0, slot=0;
+  CounterType counter=POISON;
+  int16_t before=0, previousLife=0;
+  bool lifeApplied=false;
+};
 UndoRecord lastUndo;
 uint8_t knobDivider=1;
 bool invertKnob=false, playing=false, fresh=true, lifeDirty=false, selectionDirty=false, counterDirty=false;
@@ -44,6 +50,39 @@ KnockoutEffect knockout[4];
 int16_t life[4]={40,40,40,40}, poison[4]={0,0,0,0}, energy[4]={0,0,0,0};
 int16_t tax[4]={0,0,0,0}, cmdDamage[4]={0,0,0,0}, treasure[4]={0,0,0,0};
 int16_t experience[4]={0,0,0,0};
+// Indexed by commander owner, commander slot A/B and defending player.
+// Do not merge values from two commanders: 21 combat damage is per commander.
+int16_t commanderMatrix[4][2][4]={};
+bool partnerEnabled[4]={false,false,false,false};
+bool commanderAutoLife=true;
+uint8_t commanderSource=0, commanderTarget=1, commanderSlot=0;
+enum EventKind : uint8_t {EV_START, EV_LIFE, EV_COUNTER, EV_COMMANDER, EV_TURN, EV_MONARCH, EV_INITIATIVE, EV_UNDO};
+struct GameEvent {
+  uint32_t seconds=0;
+  EventKind kind=EV_START;
+  uint8_t actor=0,target=0,slot=0;
+  int16_t before=0,after=0;
+};
+constexpr uint8_t HISTORY_CAPACITY=32, HISTORY_ROWS=5;
+GameEvent events[HISTORY_CAPACITY];
+uint8_t historySize=0, historyNext=0, historyOffset=0;
+uint32_t gameStartedAt=0;
+void recordEvent(EventKind kind,uint8_t actor,uint8_t target,uint8_t slot,int16_t before,int16_t after){
+  GameEvent &e=events[historyNext];
+  e.seconds=(millis()-gameStartedAt)/1000;
+  e.kind=kind;e.actor=actor;e.target=target;e.slot=slot;e.before=before;e.after=after;
+  historyNext=(historyNext+1)%HISTORY_CAPACITY;
+  if(historySize<HISTORY_CAPACITY)historySize++;
+  historyOffset=0;
+}
+bool commanderKnockout(int target){
+  for(int p=0;p<players;p++)for(int slot=0;slot<2;slot++){
+    if(slot==1&&!partnerEnabled[p])continue;
+    if(commanderMatrix[p][slot][target]>=21)return true;
+  }
+  return false;
+}
+
 uint32_t lastChange=0, lastTouch=0, lastDiagnostics=0;
 uint32_t lastBatteryRead=0;
 float batteryVolts=0.0f;
@@ -131,6 +170,11 @@ void persist() {
   store.putUChar("focused",selected);store.putUChar("turnPlayer",activeTurn);
   store.putUInt("turnSteps",turnSteps);store.putUChar("monarch",monarchOwner);
   store.putUChar("initiative",initiativeOwner);
+  store.putBool("cmdAutoLife",commanderAutoLife);
+  uint8_t mask=0;
+  for(int p=0;p<4;p++)if(partnerEnabled[p])mask|=(1<<p);
+  store.putUChar("cmdPartners",mask);
+  store.putBytes("cmdMatrix",commanderMatrix,sizeof(commanderMatrix));
   for(int p=0;p<4;p++){
     String suffix=String(p);
     store.putShort(("life"+suffix).c_str(),life[p]);
@@ -157,6 +201,14 @@ void load() {
   turnSteps=store.getUInt("turnSteps",0);
   monarchOwner=store.getUChar("monarch",255);
   initiativeOwner=store.getUChar("initiative",255);
+  commanderAutoLife=store.getBool("cmdAutoLife",true);
+  uint8_t pmask=store.getUChar("cmdPartners",0);
+  for(int p=0;p<4;p++)partnerEnabled[p]=(pmask&(1<<p))!=0;
+  if(store.getBytesLength("cmdMatrix")==sizeof(commanderMatrix))
+    store.getBytes("cmdMatrix",commanderMatrix,sizeof(commanderMatrix));
+  for(int p=0;p<4;p++)for(int q=0;q<2;q++)for(int t=0;t<4;t++)
+    commanderMatrix[p][q][t]=constrain(commanderMatrix[p][q][t],0,999);
+  commanderSource=0;commanderTarget=players>1?1:0;commanderSlot=0;
   if(monarchOwner>=players)monarchOwner=255;
   if(initiativeOwner>=players)initiativeOwner=255;
   for(int p=0;p<4;p++){
@@ -202,6 +254,10 @@ int batteryPercentApprox(float voltage){
 
 void clearUndo(){lastUndo.kind=UNDO_NONE;}
 void newGame() {
+  memset(commanderMatrix,0,sizeof(commanderMatrix));
+  for(int p=0;p<4;p++)partnerEnabled[p]=false;
+  commanderSource=0;commanderTarget=players>1?1:0;commanderSlot=0;
+  historySize=0;historyNext=0;historyOffset=0;gameStartedAt=millis();
   for(int i=0;i<4;i++){
     life[i]=startLife;poison[i]=0;energy[i]=0;tax[i]=0;cmdDamage[i]=0;
     treasure[i]=0;experience[i]=0;knockout[i].active=false;
@@ -214,13 +270,17 @@ void newGame() {
 }
 void chooseFirstPlayer(){
   activeTurn=firstCandidate;selected=activeTurn;
-  turnSteps=0;turnStartedAt=millis();markSaved();changePage(GAME);
+  turnSteps=0;turnStartedAt=millis();
+  recordEvent(EV_START,activeTurn,activeTurn,0,0,1);
+  markSaved();changePage(GAME);
 }
 void nextTurn(){
   if(!playing)return;
+  uint8_t previous=activeTurn;
   activeTurn=(activeTurn+1)%players;
   turnSteps++;
   selected=activeTurn;turnStartedAt=millis();
+  recordEvent(EV_TURN,activeTurn,activeTurn,0,previous,activeTurn);
   markSaved();changePage(GAME);
 }
 void drawTurnLine(){
@@ -244,7 +304,7 @@ void drawOwners(){
   centered(s,320,1,MK_FAINT);
 }
 void drawHome(){
-  base("MAGIC KNOB OS");centered("2.0 ALPHA 5",77,2,MK_FAINT);
+  base("MAGIC KNOB OS");centered("2.0 ALPHA 6",77,2,MK_FAINT);
   uiButton(90,111,180,54,"MAGIC",3,0x10c4);
   uiButton(90,174,180,42,"NUOVA",2);
   uiButton(90,222,180,42,"STRUMENTI",2);
@@ -291,7 +351,7 @@ void knockoutBadge(int p,uint16_t color){
   if(players!=2)return;
   const int y=(p==0)?84:224;
   lcd->fillRoundRect(251,y,39,21,7,MK_PANEL);
-  if(life[p]>0)return;
+  if(life[p]>0&&!commanderKnockout(p))return;
   lcd->fillRoundRect(251,y,39,21,7,color);
   printAt("KO",263,y+7,1,MK_DARK);
 }
@@ -447,14 +507,14 @@ void drawResetConfirm(){
 }
 const char* counterName(){switch(selectedCounter){
   case POISON:return "VELENO";case ENERGY:return "ENERGIA";
-  case TAX:return "TASSA CMD";case COMMANDER:return "DANNI CMD";
-  case TREASURE:return "TESORI";default:return "ESPERIENZA";
+  case TAX:return "TASSA CMD";case TREASURE:return "TESORI";
+  default:return "ESPERIENZA";
 }}
 int16_t& counterFor(int p,CounterType type){
   switch(type){
     case POISON:return poison[p];case ENERGY:return energy[p];
-    case TAX:return tax[p];case COMMANDER:return cmdDamage[p];
-    case TREASURE:return treasure[p];default:return experience[p];
+    case TAX:return tax[p];case TREASURE:return treasure[p];
+    default:return experience[p];
   }
 }
 int16_t &currentCounter(){return counterFor(selected,selectedCounter);}
