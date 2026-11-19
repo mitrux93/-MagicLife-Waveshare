@@ -1,4 +1,4 @@
-name: Compila Magic Knob OS v2 alpha7
+name: Compila Magic Knob OS v2 alpha8
 on:
   push:
     branches: [feature/firmware-completo-v2]
@@ -42,18 +42,18 @@ jobs:
           BOOT_APP0="$HOME/.arduino15/packages/esp32/hardware/esp32/2.0.14/tools/partitions/boot_app0.bin"
           test -s "$BOOT_APP0"
           python3 -m esptool --chip esp32s3 merge_bin \
-            -o firmware/MagicKnobOS_v2alpha7_ESP32S3_FLASH_0x0.bin \
+            -o firmware/MagicKnobOS_v2alpha8_ESP32S3_FLASH_0x0.bin \
             --flash_mode dio --flash_freq 80m --flash_size 16MB \
             0x0 build/MagicKnobOS.ino.bootloader.bin \
             0x8000 build/MagicKnobOS.ino.partitions.bin \
             0xe000 "$BOOT_APP0" \
             0x10000 build/MagicKnobOS.ino.bin
-          cp build/MagicKnobOS.ino.bin firmware/MagicKnobOS_v2alpha7_ESP32S3_APP_0x10000.bin
+          cp build/MagicKnobOS.ino.bin firmware/MagicKnobOS_v2alpha8_ESP32S3_APP_0x10000.bin
           sha256sum firmware/*.bin > firmware/SHA256SUMS.txt
       - name: Pubblica BIN scaricabile
         uses: actions/upload-artifact@v4
         with:
-          name: MagicKnobOS-v2alpha7-ESP32S3-BIN
+          name: MagicKnobOS-v2alpha8-ESP32S3-BIN
           path: firmware/
           if-no-files-found: error
           retention-days: 14
