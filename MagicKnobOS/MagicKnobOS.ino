@@ -6,7 +6,7 @@
 #include <driver/gpio.h>
 #include <string.h>
 
-// Magic Knob OS 2.0-alpha4.2 | CW rising-edge option and independent pulse diagnostics
+// Magic Knob OS 2.0-alpha5 | MTG Commander UX: 1-4 seats, turns, first player, undo and game states
 // Experimental firmware, NOT factory-complete. Do NOT flash to ESP32-U4WDH.
 // Patched ST77916 V2 library required, see GitHub Actions workflow.
 constexpr int PIN_CS=14, PIN_CLK=13, PIN_D0=15, PIN_D1=16, PIN_D2=17, PIN_D3=18;
@@ -19,13 +19,19 @@ Preferences store;
 constexpr uint16_t MK_DARK=0x0862, MK_PANEL=0x18e4, MK_PANEL2=0x2165, MK_GOLD=0xd587;
 constexpr uint16_t MK_FAINT=0x732d, MK_WHITE=0xf79e, MK_BLUE=0x3d9d, MK_AMBER=0xfbc5;
 constexpr uint16_t MK_RED=0xf2c5, MK_GREEN=0x5e0c;
-enum Page : uint8_t {HOME, SETUP, GAME, RESET_CONFIRM, COUNTERS, TOOLS, ROLL, TIMER, SETTINGS, DISPLAY_SETTINGS, KNOB_SETTINGS, BATTERY, DIAG};
-enum RollType : uint8_t {ROLL_D6, ROLL_D20, ROLL_COIN};
+enum Page : uint8_t {HOME, SETUP, GAME, GAME_MENU, FIRST_PLAYER, GAME_STATUS, RESET_CONFIRM, COUNTERS, TOOLS, ROLL, TIMER, SETTINGS, DISPLAY_SETTINGS, KNOB_SETTINGS, BATTERY, DIAG};
+enum RollType : uint8_t {ROLL_D4, ROLL_D6, ROLL_D8, ROLL_D10, ROLL_D12, ROLL_D20, ROLL_D100, ROLL_COIN};
 RollType rollType=ROLL_D20;
 Page page=HOME;
-enum CounterType : uint8_t {POISON, ENERGY, TAX, COMMANDER};
+enum CounterType : uint8_t {POISON, ENERGY, TAX, COMMANDER, TREASURE, EXPERIENCE};
+constexpr uint8_t COUNTER_COUNT=6;
 CounterType selectedCounter=POISON;
 uint8_t players=2, startLife=40, selected=0, brightness=210;
+uint8_t activeTurn=0, firstCandidate=0, monarchOwner=255, initiativeOwner=255;
+uint32_t turnSteps=0, turnStartedAt=0, lastTurnPaintAt=0;
+enum UndoKind : uint8_t {UNDO_NONE, UNDO_LIFE, UNDO_COUNTER};
+struct UndoRecord { UndoKind kind=UNDO_NONE; uint8_t player=0, previousSelected=0; CounterType counter=POISON; int16_t before=0; };
+UndoRecord lastUndo;
 uint8_t knobDivider=1;
 bool invertKnob=false, playing=false, fresh=true, lifeDirty=false, selectionDirty=false, counterDirty=false;
 uint8_t lifeDirtyMask=0x03;
@@ -34,8 +40,10 @@ struct KnockoutEffect {
   uint8_t frame=255;
   uint32_t started=0;
 };
-KnockoutEffect knockout[2];
-int16_t life[2]={40,40}, poison[2]={0,0}, energy[2]={0,0}, tax[2]={0,0}, cmdDamage[2]={0,0};
+KnockoutEffect knockout[4];
+int16_t life[4]={40,40,40,40}, poison[4]={0,0,0,0}, energy[4]={0,0,0,0};
+int16_t tax[4]={0,0,0,0}, cmdDamage[4]={0,0,0,0}, treasure[4]={0,0,0,0};
+int16_t experience[4]={0,0,0,0};
 uint32_t lastChange=0, lastTouch=0, lastDiagnostics=0;
 uint32_t lastBatteryRead=0;
 float batteryVolts=0.0f;
@@ -120,32 +128,46 @@ void persist() {
   store.putUChar("players",players);store.putUChar("initial",startLife);
   store.putUChar("bright",brightness);store.putUChar("pulseDiv",knobDivider);
   store.putBool("reverse",invertKnob);store.putBool("cwRise",clockwiseRising);store.putBool("playing",playing);
-  for(int p=0;p<2;p++){
+  store.putUChar("focused",selected);store.putUChar("turnPlayer",activeTurn);
+  store.putUInt("turnSteps",turnSteps);store.putUChar("monarch",monarchOwner);
+  store.putUChar("initiative",initiativeOwner);
+  for(int p=0;p<4;p++){
     String suffix=String(p);
     store.putShort(("life"+suffix).c_str(),life[p]);
     store.putShort(("poison"+suffix).c_str(),poison[p]);
     store.putShort(("energy"+suffix).c_str(),energy[p]);
     store.putShort(("tax"+suffix).c_str(),tax[p]);
     store.putShort(("cmd"+suffix).c_str(),cmdDamage[p]);
+    store.putShort(("treasure"+suffix).c_str(),treasure[p]);
+    store.putShort(("experience"+suffix).c_str(),experience[p]);
   }
   needsSave=false;
 }
 void load() {
   store.begin("magic-os",false);
-  players=store.getUChar("players",2)==1?1:2;
+  players=constrain((int)store.getUChar("players",2),1,4);
   startLife=store.getUChar("initial",40)==20?20:40;
   brightness=constrain(store.getUChar("bright",210),40,255);
   knobDivider=constrain((int)store.getUChar("pulseDiv",1),1,4);
   invertKnob=store.getBool("reverse",false);
   clockwiseRising=store.getBool("cwRise",true);
   playing=store.getBool("playing",false);
-  for(int p=0;p<2;p++){
+  selected=constrain((int)store.getUChar("focused",0),0,(int)players-1);
+  activeTurn=constrain((int)store.getUChar("turnPlayer",0),0,(int)players-1);
+  turnSteps=store.getUInt("turnSteps",0);
+  monarchOwner=store.getUChar("monarch",255);
+  initiativeOwner=store.getUChar("initiative",255);
+  if(monarchOwner>=players)monarchOwner=255;
+  if(initiativeOwner>=players)initiativeOwner=255;
+  for(int p=0;p<4;p++){
     String suffix=String(p);
     life[p]=constrain(store.getShort(("life"+suffix).c_str(),startLife),-99,999);
     poison[p]=constrain(store.getShort(("poison"+suffix).c_str(),0),0,99);
     energy[p]=constrain(store.getShort(("energy"+suffix).c_str(),0),0,999);
     tax[p]=constrain(store.getShort(("tax"+suffix).c_str(),0),0,999);
     cmdDamage[p]=constrain(store.getShort(("cmd"+suffix).c_str(),0),0,999);
+    treasure[p]=constrain(store.getShort(("treasure"+suffix).c_str(),0),0,999);
+    experience[p]=constrain(store.getShort(("experience"+suffix).c_str(),0),0,999);
   }
 }
 void setBrightness(){ledcWrite(0,brightness);}
@@ -177,15 +199,52 @@ int batteryPercentApprox(float voltage){
   }
   return 100;
 }
+
+void clearUndo(){lastUndo.kind=UNDO_NONE;}
 void newGame() {
-  for(int i=0;i<2;i++){
+  for(int i=0;i<4;i++){
     life[i]=startLife;poison[i]=0;energy[i]=0;tax[i]=0;cmdDamage[i]=0;
-    knockout[i].active=false;
+    treasure[i]=0;experience[i]=0;knockout[i].active=false;
   }
-  selected=0;playing=true;markSaved();changePage(GAME);
+  selected=0;activeTurn=0;turnSteps=0;turnStartedAt=millis();
+  monarchOwner=initiativeOwner=255;clearUndo();
+  playing=true;
+  firstCandidate=(uint8_t)(esp_random()%players);
+  markSaved();changePage(FIRST_PLAYER);
+}
+void chooseFirstPlayer(){
+  activeTurn=firstCandidate;selected=activeTurn;
+  turnSteps=0;turnStartedAt=millis();markSaved();changePage(GAME);
+}
+void nextTurn(){
+  if(!playing)return;
+  activeTurn=(activeTurn+1)%players;
+  turnSteps++;
+  selected=activeTurn;turnStartedAt=millis();
+  markSaved();changePage(GAME);
+}
+void drawTurnLine(){
+  if(page!=GAME)return;
+  lcd->fillRect(64,50,232,12,MK_DARK);
+  uint32_t seconds=(millis()-turnStartedAt)/1000;
+  char line[44];
+  snprintf(line,sizeof(line),"P%u  GIRO %lu  %02lu:%02lu",
+           activeTurn+1,(unsigned long)(1+turnSteps/players),
+           (unsigned long)((seconds/60)%100),(unsigned long)(seconds%60));
+  centered(line,52,1,MK_GOLD);
+  lastTurnPaintAt=millis();
+}
+void drawOwners(){
+  if(page!=GAME)return;
+  char s[50],m[10],i[10];
+  if(monarchOwner==255)strcpy(m,"-");else snprintf(m,sizeof(m),"P%u",monarchOwner+1);
+  if(initiativeOwner==255)strcpy(i,"-");else snprintf(i,sizeof(i),"P%u",initiativeOwner+1);
+  snprintf(s,sizeof(s),"MONARCA:%s  INIZIATIVA:%s",m,i);
+  lcd->fillRect(54,319,252,10,MK_DARK);
+  centered(s,320,1,MK_FAINT);
 }
 void drawHome(){
-  base("MAGIC KNOB OS");centered("2.0 ALPHA 4.2",77,2,MK_FAINT);
+  base("MAGIC KNOB OS");centered("2.0 ALPHA 5",77,2,MK_FAINT);
   uiButton(90,111,180,54,"MAGIC",3,0x10c4);
   uiButton(90,174,180,42,"NUOVA",2);
   uiButton(90,222,180,42,"STRUMENTI",2);
@@ -193,14 +252,16 @@ void drawHome(){
 }
 void drawSetup(){
   base("NUOVA PARTITA");
-  centered("Giocatori",94,2,MK_FAINT);
-  uiButton(72,120,100,47,"1",3,players==1?MK_BLUE:MK_PANEL);
-  uiButton(188,120,100,47,"2",3,players==2?MK_AMBER:MK_PANEL);
-  centered("Punti vita",183,2,MK_FAINT);
-  uiButton(72,208,100,47,"20",2,startLife==20?MK_BLUE:MK_PANEL);
-  uiButton(188,208,100,47,"40",2,startLife==40?MK_AMBER:MK_PANEL);
-  uiButton(105,276,150,46,"INIZIA",2,MK_GREEN);
-  centered("<<",325,1,MK_FAINT);
+  centered("Giocatori",77,2,MK_FAINT);
+  for(int p=0;p<4;p++){
+    char n[3];snprintf(n,sizeof(n),"%u",p+1);
+    int x=(p%2==0)?75:189, y=(p<2)?104:158;
+    uiButton(x,y,96,44,n,3,players==p+1?MK_BLUE:MK_PANEL);
+  }
+  centered("Punti vita",209,2,MK_FAINT);
+  uiButton(72,232,100,43,"20",2,startLife==20?MK_BLUE:MK_PANEL);
+  uiButton(188,232,100,43,"40",2,startLife==40?MK_AMBER:MK_PANEL);
+  uiButton(105,287,150,42,"INIZIA",2,MK_GREEN);
 }
 void plusMinus(int x,int y,bool plus,uint16_t color) {
   lcd->fillCircle(x,y,26,MK_PANEL);lcd->drawCircle(x,y,26,color);
@@ -236,9 +297,14 @@ void knockoutBadge(int p,uint16_t color){
 }
 void lifeArea(int p){
   char buf[16];snprintf(buf,sizeof(buf),"%d",life[p]);
-  if(players==1){
-    lcd->fillRect(95,133,170,82,MK_DARK);
-    centered(buf,136,8,life[p]<=0?MK_RED:MK_BLUE);
+  if(players!=2){
+    if(p!=selected)return;
+    lcd->fillRect(92,173,176,85,MK_DARK);
+    int digits=strlen(buf);
+    int size=digits<=2?9:(digits==3?7:5);
+    int x=180-(digits*6*size)/2;
+    int y=212-(8*size)/2;
+    printAt(buf,x,y,size,life[p]<=0?MK_RED:(life[p]<=5?MK_GOLD:MK_BLUE));
     return;
   }
   const int y=p==0?109:249;
@@ -296,23 +362,75 @@ void updateKOAnimations(){
     }
   }
 }
+
 void drawGame(){
   base("MAGIC LIFE");
-  if(players==1){
-    centered("GIOCATORE 1",96,2,MK_BLUE);
-    plusMinus(58,184,false,MK_RED);plusMinus(302,184,true,MK_GREEN);
-    uiButton(65,278,95,38,"CONT.",2);
-    uiButton(199,278,95,38,"MENU",2);
+  if(players!=2){
+    int buttonW=players==1?110:76;
+    int gap=players==1?0:4;
+    int total=players*buttonW+(players-1)*gap;
+    int offset=(360-total)/2;
+    for(int p=0;p<players;p++){
+      char b[20];
+      snprintf(b,sizeof(b),"P%d:%d",p+1,life[p]);
+      uiButton(offset+p*(buttonW+gap),91,buttonW,37,b,1,
+               selected==p?MK_BLUE:MK_PANEL);
+    }
+    char focus[22];snprintf(focus,sizeof(focus),"GIOCATORE %u",selected+1);
+    centered(focus,145,2,MK_GOLD);
+    plusMinus(53,214,false,MK_RED);plusMinus(307,214,true,MK_GREEN);
+    uiButton(61,276,107,40,"SEGNALI",1);
+    uiButton(192,276,107,40,"MENU",2);
+    lifeArea(selected);
   }else{
-    // Balanced panels for one screen viewed by two players.
     duelPanel(0);duelPanel(1);
     lcd->drawFastHLine(89,194,182,MK_GOLD);
     uiButton(58,178,79,32,"SEGN.",2,MK_PANEL);
-    uiButton(142,178,78,32,"RESET",2,MK_PANEL);
+    uiButton(142,178,78,32,"TURNO",2,MK_PANEL);
     uiButton(225,178,77,32,"MENU",2,MK_PANEL);
+    lifeArea(0);lifeArea(1);
+    paintSelection();
   }
-  lifeArea(0);if(players==2)lifeArea(1);
-  paintSelection();
+  drawTurnLine();drawOwners();
+}
+void drawGameMenu(){
+  base("MENU PARTITA");
+  uiButton(59,93,112,45,"DADI",2);
+  uiButton(187,93,112,45,"PRIMO",2);
+  uiButton(59,150,112,45,"TURNO",2);
+  uiButton(187,150,112,45,"STATO",2);
+  uiButton(59,207,112,45,"ANNULLA",1,lastUndo.kind==UNDO_NONE?MK_PANEL:MK_GREEN);
+  uiButton(187,207,112,45,"RESET",2,MK_RED);
+  uiButton(59,264,112,45,"HOME",2);
+  uiButton(187,264,112,45,"PARTITA",1,MK_BLUE);
+}
+void drawFirstPlayer(){
+  base("CHI INIZIA?");
+  centered("ESTRAZIONE CASUALE",84,1,MK_FAINT);
+  char n[5];snprintf(n,sizeof(n),"P%u",firstCandidate+1);
+  centered(n,134,10,MK_GOLD);
+  uiButton(64,258,109,49,"LANCIA",2);
+  uiButton(187,258,109,49,"CONFERMA",1,MK_GREEN);
+}
+void drawGameStatus(){
+  base("STATO PARTITA");
+  centered("ASSEGNA A GIOCATORE",73,1,MK_FAINT);
+  int w=players==1?100:69, gap=players==1?0:6;
+  int total=players*w+(players-1)*gap, start=(360-total)/2;
+  for(int p=0;p<players;p++){
+    char n[4];snprintf(n,sizeof(n),"P%d",p+1);
+    uiButton(start+p*(w+gap),96,w,39,n,2,
+             p==selected?MK_BLUE:MK_PANEL);
+  }
+  centered("MONARCA",157,2,MK_GOLD);
+  char m[30];if(monarchOwner==255)strcpy(m,"NESSUNO");
+  else snprintf(m,sizeof(m),"P%u",monarchOwner+1);
+  uiButton(96,178,168,38,m,2,monarchOwner==selected?MK_GREEN:MK_PANEL);
+  centered("INIZIATIVA",226,2,MK_GOLD);
+  char t[30];if(initiativeOwner==255)strcpy(t,"NESSUNO");
+  else snprintf(t,sizeof(t),"P%u",initiativeOwner+1);
+  uiButton(96,247,168,38,t,2,initiativeOwner==selected?MK_GREEN:MK_PANEL);
+  uiButton(110,297,140,34,"PARTITA",2);
 }
 void drawResetConfirm(){
   base("RESET PARTITA");
@@ -324,18 +442,41 @@ void drawResetConfirm(){
 }
 const char* counterName(){switch(selectedCounter){
   case POISON:return "VELENO";case ENERGY:return "ENERGIA";
-  case TAX:return "TASSA CMD";default:return "DANNI CMD";
+  case TAX:return "TASSA CMD";case COMMANDER:return "DANNI CMD";
+  case TREASURE:return "TESORI";default:return "ESPERIENZA";
 }}
-int16_t &currentCounter() {
-  int p=players==1?0:selected;
-  switch(selectedCounter){case POISON:return poison[p];case ENERGY:return energy[p];
-    case TAX:return tax[p];default:return cmdDamage[p];}
+int16_t& counterFor(int p,CounterType type){
+  switch(type){
+    case POISON:return poison[p];case ENERGY:return energy[p];
+    case TAX:return tax[p];case COMMANDER:return cmdDamage[p];
+    case TREASURE:return treasure[p];default:return experience[p];
+  }
+}
+int16_t &currentCounter(){return counterFor(selected,selectedCounter);}
+void undoLast(){
+  if(lastUndo.kind==UNDO_NONE)return;
+  const UndoRecord u=lastUndo;clearUndo();
+  selected=u.previousSelected<players?u.previousSelected:0;
+  if(u.kind==UNDO_LIFE){
+    life[u.player]=u.before;
+    knockout[u.player].active=false;
+    markSaved();changePage(GAME);
+  }else{
+    counterFor(u.player,u.counter)=u.before;
+    selected=u.player;
+    selectedCounter=u.counter;
+    markSaved();changePage(COUNTERS);
+  }
 }
 void drawCounters(){
   base("SEGNALINI");
   centered("SCEGLI GIOCATORE",75,1,MK_FAINT);
-  uiButton(65,94,110,39,selected==0?"[P1]":" P1 ",2,selected==0?MK_BLUE:MK_PANEL);
-  if(players==2)uiButton(185,94,110,39,selected==1?"[P2]":" P2 ",2,selected==1?MK_AMBER:MK_PANEL);
+  int w=players==1?110:70,gap=players==1?0:6;
+  int x0=(360-(players*w+(players-1)*gap))/2;
+  for(int p=0;p<players;p++){
+    char buf[5];snprintf(buf,sizeof(buf),"P%d",p+1);
+    uiButton(x0+p*(w+gap),94,w,39,buf,2,p==selected?MK_BLUE:MK_PANEL);
+  }
   uiButton(68,157,42,34,"<",2);
   uiButton(250,157,42,34,">",2);
   centered(counterName(),145,2,MK_GOLD);
@@ -515,6 +656,8 @@ void adjustLife(int p,int change) {
   const int previous=life[p];
   const int updated=constrain(previous+change,-99,999);
   if(updated==previous)return;
+  lastUndo.kind=UNDO_LIFE;lastUndo.player=p;lastUndo.before=previous;
+  lastUndo.previousSelected=selected;
   const bool selectionChanged=(selected!=p);
   life[p]=updated;selected=p;
   // Trigger once on crossing >0 to <=0. Never trigger again below zero.
@@ -531,8 +674,11 @@ void adjustLife(int p,int change) {
 }
 void adjustCounter(int amount) {
   int16_t &c=currentCounter();
-  c=constrain((int)c+amount,0,999);
-  markSaved();counterDirty=true;
+  int updated=constrain((int)c+amount,0,999);
+  if(updated==c)return;
+  lastUndo.kind=UNDO_COUNTER;lastUndo.player=selected;lastUndo.counter=selectedCounter;
+  lastUndo.before=c;lastUndo.previousSelected=selected;
+  c=updated;markSaved();counterDirty=true;
 }
 bool readTouch(int &x,int &y) {
   Wire.beginTransmission(TOUCH_ADDR);Wire.write((uint8_t)0x01);
