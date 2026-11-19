@@ -41,6 +41,7 @@ UndoRecord lastUndo;
 uint8_t knobDivider=1;
 bool invertKnob=false, playing=false, fresh=true, lifeDirty=false, selectionDirty=false, counterDirty=false;
 uint8_t lifeDirtyMask=0x03;
+uint8_t paintedSplitSelected=255;
 struct KnockoutEffect {
   bool active=false;
   uint8_t frame=255;
@@ -189,7 +190,7 @@ void base(const char *title) {
 }
 void changePage(Page next) {
   if(next!=GAME)for(auto &fx:knockout)fx.active=false;
-  page=next;fresh=true;lifeDirty=true;lifeDirtyMask=0x03;
+  page=next;fresh=true;lifeDirty=true;lifeDirtyMask=0x0f;
   selectionDirty=true;counterDirty=true;
 }
 void persist() {
@@ -388,8 +389,60 @@ void knockoutBadge(int p,uint16_t color){
   lcd->fillRoundRect(251,y,39,21,7,color);
   printAt("KO",263,y+7,1,MK_DARK);
 }
+// 3 players: a top arch-like card and two lower cards; 4 players: four
+// balanced regions. All card bounds stay inside the visible 360px circle.
+bool splitCardBounds(int p,int &x,int &y,int &w,int &h){
+  if(p<0||p>=players||players<3)return false;
+  if(players==3){
+    if(p==0){x=97;y=76;w=166;h=100;}
+    else {x=p==1?47:189;y=196;w=124;h=98;}
+  }else{
+    x=(p%2)?189:47;
+    y=(p<2)?77:196;
+    w=124;h=98;
+  }
+  return true;
+}
+void splitChangeButton(int x,int y,bool plus,uint16_t accent){
+  lcd->fillCircle(x,y,13,MK_DARK);
+  lcd->drawCircle(x,y,13,accent);
+  lcd->fillRect(x-7,y-1,14,3,MK_WHITE);
+  if(plus)lcd->fillRect(x-1,y-7,3,14,MK_WHITE);
+}
+void drawSplitCard(int p){
+  if(page!=GAME)return;
+  int x,y,w,h;
+  if(!splitCardBounds(p,x,y,w,h))return;
+  uint16_t accents[4]={MK_BLUE,MK_AMBER,MK_GREEN,MK_RED};
+  uint16_t accent=commanderKnockout(p)?MK_RED:accents[p];
+  lcd->fillRoundRect(x,y,w,h,13,MK_PANEL);
+  lcd->drawRoundRect(x,y,w,h,13,selected==p?MK_GOLD:accent);
+  if(selected==p)lcd->drawRoundRect(x+2,y+2,w-4,h-4,11,MK_GOLD);
+  char b[24];snprintf(b,sizeof(b),"P%d%s",p+1,activeTurn==p?"*":"");
+  printAt(b,x+(w-(int)strlen(b)*12)/2,y+9,2,selected==p?MK_GOLD:accent);
+  snprintf(b,sizeof(b),"%d",life[p]);
+  int digits=strlen(b);
+  int scale=digits<=2?5:(digits==3?4:3);
+  int textX=x+(w-digits*6*scale)/2;
+  printAt(b,textX,y+34,scale,life[p]<=0||commanderKnockout(p)?MK_RED:MK_WHITE);
+  splitChangeButton(x+16,y+55,false,MK_RED);
+  splitChangeButton(x+w-16,y+55,true,MK_GREEN);
+  snprintf(b,sizeof(b),"V%d E%d T%d",poison[p],energy[p],tax[p]);
+  printAt(b,x+(w-(int)strlen(b)*6)/2,y+82,1,MK_FAINT);
+}
+void drawSplitGame(){
+  base("MAGIC LIFE");
+  if(players==4)lcd->drawFastVLine(180,75,229,MK_PANEL2);
+  lcd->drawFastHLine(53,184,254,MK_PANEL2);
+  for(int p=0;p<players;p++)drawSplitCard(p);
+  paintedSplitSelected=selected;
+  lcd->fillCircle(180,184,25,MK_DARK);
+  lcd->drawCircle(180,184,24,MK_GOLD);
+  printAt("MENU",168,180,1,MK_GOLD);
+}
 void lifeArea(int p){
   char buf[16];snprintf(buf,sizeof(buf),"%d",life[p]);
+  if(players>=3){drawSplitCard(p);return;}
   if(players!=2){
     if(p!=selected)return;
     // Update both large life total and the selected player's overview chip.
@@ -423,6 +476,13 @@ void lifeArea(int p){
   knockoutBadge(p,MK_RED);
 }
 void paintSelection(){
+  if(players>=3){
+    if(paintedSplitSelected<players && paintedSplitSelected!=selected)
+      drawSplitCard(paintedSplitSelected);
+    drawSplitCard(selected);
+    paintedSplitSelected=selected;
+    return;
+  }
   if(players!=2)return;
   for(int p=0;p<2;p++){
     const int y=p==0?75:215;
@@ -464,7 +524,8 @@ void updateKOAnimations(){
 
 void drawGame(){
   base("MAGIC LIFE");
-  if(players!=2){
+  if(players>=3)drawSplitGame();
+  else if(players!=2){
     int buttonW=players==1?110:76;
     int gap=players==1?0:4;
     int total=players*buttonW+(players-1)*gap;
@@ -490,7 +551,7 @@ void drawGame(){
     lifeArea(0);lifeArea(1);
     paintSelection();
   }
-  if(players!=2 && commanderKnockout(selected))
+  if(players==1 && commanderKnockout(selected))
     centered("KO: DANNI COMMANDER",264,1,MK_RED);
   drawTurnLine();drawOwners();
 }
@@ -942,7 +1003,21 @@ void touchAction(int x,int y){
       firstCandidate=(uint8_t)(esp_random()%players);fresh=true;
     }else if(within(x,y,187,258,296,307))chooseFirstPlayer();
   } else if(page==GAME){
-    if(players!=2){
+    if(players>=3){
+      if(abs(x-180)<=28 && abs(y-184)<=28)changePage(GAME_MENU);
+      else if(y>=49&&y<=70&&x>=95&&x<=265)nextTurn();
+      else{
+        for(int p=0;p<players;p++){
+          int rx,ry,rw,rh;
+          if(!splitCardBounds(p,rx,ry,rw,rh))continue;
+          if(!within(x,y,rx,ry,rx+rw,ry+rh))continue;
+          if(abs(x-(rx+16))<=16 && abs(y-(ry+55))<=18)adjustLife(p,-1);
+          else if(abs(x-(rx+rw-16))<=16 && abs(y-(ry+55))<=18)adjustLife(p,1);
+          else if(selected!=p){selected=p;selectionDirty=true;markSaved();}
+          break;
+        }
+      }
+    }else if(players!=2){
       if(near(x,y,53,214))adjustLife(selected,-1);
       else if(near(x,y,307,214))adjustLife(selected,1);
       else if(within(x,y,61,276,168,316))changePage(COUNTERS);
@@ -1217,6 +1292,8 @@ void loop(){
         if(players==2){
           if(mask&0x01)lifeArea(0);
           if(mask&0x02)lifeArea(1);
+        }else if(players>=3){
+          for(int p=0;p<players;p++)if(mask&(1<<p))lifeArea(p);
         }else if(mask&(1<<selected))lifeArea(selected);
         lastLifePaintAt=millis();
       }
