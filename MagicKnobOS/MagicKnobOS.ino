@@ -708,47 +708,99 @@ void touchAction(int x,int y){
     else if(within(x,y,90,174,270,216))changePage(SETUP);
     else if(within(x,y,90,222,270,264))changePage(TOOLS);
     else if(within(x,y,90,271,270,313))changePage(SETTINGS);
+
   } else if(page==SETUP){
-    if(within(x,y,72,120,172,167)){players=1;fresh=true;markSaved();}
-    else if(within(x,y,188,120,288,167)){players=2;fresh=true;markSaved();}
-    else if(within(x,y,72,208,172,255)){startLife=20;fresh=true;markSaved();}
-    else if(within(x,y,188,208,288,255)){startLife=40;fresh=true;markSaved();}
-    else if(within(x,y,105,276,255,322))newGame();
-    else if(y>320)changePage(HOME);
+    if(within(x,y,75,104,171,148)){players=1;fresh=true;markSaved();}
+    else if(within(x,y,189,104,285,148)){players=2;fresh=true;markSaved();}
+    else if(within(x,y,75,158,171,202)){players=3;fresh=true;markSaved();}
+    else if(within(x,y,189,158,285,202)){players=4;fresh=true;markSaved();}
+    else if(within(x,y,72,232,172,275)){startLife=20;fresh=true;markSaved();}
+    else if(within(x,y,188,232,288,275)){startLife=40;fresh=true;markSaved();}
+    else if(within(x,y,105,287,255,329))newGame();
+  } else if(page==FIRST_PLAYER){
+    if(within(x,y,64,258,173,307)){
+      firstCandidate=(uint8_t)(esp_random()%players);fresh=true;
+    }else if(within(x,y,187,258,296,307))chooseFirstPlayer();
   } else if(page==GAME){
-    if(players==1){
-      if(near(x,y,58,184))adjustLife(0,-1);
-      else if(near(x,y,302,184))adjustLife(0,1);
-      else if(within(x,y,65,278,160,316))changePage(COUNTERS);
-      else if(within(x,y,199,278,294,316))changePage(HOME);
+    if(players!=2){
+      if(near(x,y,53,214))adjustLife(selected,-1);
+      else if(near(x,y,307,214))adjustLife(selected,1);
+      else if(within(x,y,61,276,168,316))changePage(COUNTERS);
+      else if(within(x,y,192,276,299,316))changePage(GAME_MENU);
+      else if(y>=91&&y<=128){
+        int w=players==1?110:76,gap=players==1?0:4;
+        int left=(360-(players*w+(players-1)*gap))/2;
+        for(int p=0;p<players;p++)
+          if(within(x,y,left+p*(w+gap),91,left+p*(w+gap)+w,128)){
+            if(selected!=p){selected=p;markSaved();fresh=true;}
+            break;
+          }
+      }else if(y>=49&&y<=72)nextTurn();
     }else{
       if(near(x,y,78,142))adjustLife(0,-1);
       else if(near(x,y,282,142))adjustLife(0,1);
       else if(near(x,y,78,282))adjustLife(1,-1);
       else if(near(x,y,282,282))adjustLife(1,1);
       else if(within(x,y,58,178,137,210))changePage(COUNTERS);
-      else if(within(x,y,142,178,220,210))changePage(RESET_CONFIRM);
-      else if(within(x,y,225,178,302,210))changePage(HOME);
-      else if(within(x,y,99,76,260,171)){selected=0;selectionDirty=true;}
-      else if(within(x,y,99,215,260,311)){selected=1;selectionDirty=true;}
+      else if(within(x,y,142,178,220,210))nextTurn();
+      else if(within(x,y,225,178,302,210))changePage(GAME_MENU);
+      else if(within(x,y,99,76,260,171)){selected=0;markSaved();selectionDirty=true;}
+      else if(within(x,y,99,215,260,311)){selected=1;markSaved();selectionDirty=true;}
+      else if(y>=49&&y<=72)nextTurn();
     }
+  } else if(page==GAME_MENU){
+    if(within(x,y,59,93,171,138))changePage(TOOLS);
+    else if(within(x,y,187,93,299,138)){
+      firstCandidate=(uint8_t)(esp_random()%players);changePage(FIRST_PLAYER);
+    }else if(within(x,y,59,150,171,195))nextTurn();
+    else if(within(x,y,187,150,299,195))changePage(GAME_STATUS);
+    else if(within(x,y,59,207,171,252))undoLast();
+    else if(within(x,y,187,207,299,252))changePage(RESET_CONFIRM);
+    else if(within(x,y,59,264,171,309))changePage(HOME);
+    else if(within(x,y,187,264,299,309))changePage(GAME);
+  } else if(page==GAME_STATUS){
+    int w=players==1?100:69,gap=players==1?0:6;
+    int left=(360-(players*w+(players-1)*gap))/2;
+    if(y>=96&&y<=135){
+      for(int p=0;p<players;p++)
+        if(within(x,y,left+p*(w+gap),96,left+p*(w+gap)+w,135)){
+          selected=p;markSaved();fresh=true;break;
+        }
+    }else if(within(x,y,96,178,264,216)){
+      monarchOwner=(monarchOwner==selected)?255:selected;markSaved();fresh=true;
+    }else if(within(x,y,96,247,264,285)){
+      initiativeOwner=(initiativeOwner==selected)?255:selected;markSaved();fresh=true;
+    }else if(within(x,y,110,297,250,331))changePage(GAME);
   } else if(page==RESET_CONFIRM){
     if(within(x,y,65,224,173,275))changePage(GAME);
     else if(within(x,y,187,224,295,275))newGame();
+
   } else if(page==COUNTERS){
-    if(within(x,y,65,94,175,133)){selected=0;fresh=true;}
-    else if(players==2&&within(x,y,185,94,295,133)){selected=1;fresh=true;}
-    else if(within(x,y,68,157,110,191)){selectedCounter=(CounterType)((selectedCounter+3)%4);fresh=true;}
-    else if(within(x,y,250,157,292,191)){selectedCounter=(CounterType)((selectedCounter+1)%4);fresh=true;}
-    else if(near(x,y,78,234))adjustCounter(-1);
+    int w=players==1?110:70,gap=players==1?0:6;
+    int left=(360-(players*w+(players-1)*gap))/2;
+    if(y>=94&&y<=133){
+      for(int p=0;p<players;p++)
+        if(within(x,y,left+p*(w+gap),94,left+p*(w+gap)+w,133)){
+          selected=p;fresh=true;markSaved();break;
+        }
+    }else if(within(x,y,68,157,110,191)){
+      selectedCounter=(CounterType)((selectedCounter+COUNTER_COUNT-1)%COUNTER_COUNT);fresh=true;
+    }else if(within(x,y,250,157,292,191)){
+      selectedCounter=(CounterType)((selectedCounter+1)%COUNTER_COUNT);fresh=true;
+    }else if(near(x,y,78,234))adjustCounter(-1);
     else if(near(x,y,282,234))adjustCounter(1);
     else if(within(x,y,111,290,249,326))changePage(GAME);
   } else if(page==TOOLS){
-    if(within(x,y,65,103,171,157)){rollType=ROLL_D6;throwTool();changePage(ROLL);}
-    else if(within(x,y,189,103,295,157)){rollType=ROLL_D20;throwTool();changePage(ROLL);}
-    else if(within(x,y,81,173,279,217)){rollType=ROLL_COIN;throwTool();changePage(ROLL);}
-    else if(within(x,y,81,227,279,271))changePage(TIMER);
-    else if(within(x,y,107,291,253,329))changePage(HOME);
+    if(y>=95&&y<=253){
+      int col=-1,row=-1;
+      for(int c=0;c<3;c++)if(x>=45+c*91&&x<=129+c*91)col=c;
+      for(int r=0;r<3;r++)if(y>=95+r*57&&y<=139+r*57)row=r;
+      if(col>=0&&row>=0){
+        int index=row*3+col;
+        if(index==8)changePage(TIMER);
+        else{rollType=(RollType)index;throwTool();changePage(ROLL);}
+      }
+    }else if(within(x,y,110,286,250,326))changePage(playing?GAME_MENU:HOME);
   } else if(page==ROLL){
     if(within(x,y,80,275,280,325)||within(x,y,75,78,285,267))throwTool();
     else if(y>325)changePage(TOOLS);
