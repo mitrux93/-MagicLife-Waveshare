@@ -5,8 +5,11 @@
 #include <esp_system.h>
 #include <driver/gpio.h>
 #include <string.h>
+#include <WiFi.h>
+#include <esp_now.h>
+#include <esp_wifi.h>
 
-// Magic Knob OS 2.0-alpha7 | 3-4 player circular split UI and cross-direction encoder filter
+// Magic Knob OS 2.0-alpha8 | ESP-NOW host / read-only spectator synchronization
 // Experimental firmware, NOT factory-complete. Do NOT flash to ESP32-U4WDH.
 // Patched ST77916 V2 library required, see GitHub Actions workflow.
 constexpr int PIN_CS=14, PIN_CLK=13, PIN_D0=15, PIN_D1=16, PIN_D2=17, PIN_D3=18;
@@ -19,7 +22,7 @@ Preferences store;
 constexpr uint16_t MK_DARK=0x0862, MK_PANEL=0x18e4, MK_PANEL2=0x2165, MK_GOLD=0xd587;
 constexpr uint16_t MK_FAINT=0x732d, MK_WHITE=0xf79e, MK_BLUE=0x3d9d, MK_AMBER=0xfbc5;
 constexpr uint16_t MK_RED=0xf2c5, MK_GREEN=0x5e0c;
-enum Page : uint8_t {HOME, SETUP, GAME, GAME_MENU, FIRST_PLAYER, GAME_STATUS, COMMANDER_DAMAGE, HISTORY, RESET_CONFIRM, COUNTERS, TOOLS, ROLL, TIMER, SETTINGS, DISPLAY_SETTINGS, KNOB_SETTINGS, BATTERY, DIAG};
+enum Page : uint8_t {HOME, SETUP, GAME, GAME_MENU, FIRST_PLAYER, GAME_STATUS, COMMANDER_DAMAGE, HISTORY, RESET_CONFIRM, COUNTERS, TOOLS, ROLL, TIMER, SETTINGS, DISPLAY_SETTINGS, KNOB_SETTINGS, BATTERY, DIAG, NETWORK};
 enum RollType : uint8_t {ROLL_D4, ROLL_D6, ROLL_D8, ROLL_D10, ROLL_D12, ROLL_D20, ROLL_D100, ROLL_COIN};
 RollType rollType=ROLL_D20;
 Page page=HOME;
@@ -82,6 +85,240 @@ bool commanderKnockout(int target){
     if(commanderMatrix[p][slot][target]>=21)return true;
   }
   return false;
+}
+
+// ESP-NOW Alpha 8: one authoritative host and one passive scoreboard
+// mirror. Single Wi-Fi channel and bounded packets (<250 bytes).
+// No password-based cryptography: four-digit matching code is a discovery
+// convenience, NOT secure authentication. Do not use for sensitive data.
+enum NetRole : uint8_t {NET_OFF=0, NET_HOST=1, NET_VIEWER=2};
+enum NetMsgType : uint8_t {NET_BEACON=1, NET_JOIN=2, NET_STATE=3, NET_ACK=4};
+constexpr uint32_t NET_MAGIC=0x4D4B4F53UL;
+constexpr uint8_t NET_VERSION=1, NET_CHANNEL=1;
+const uint8_t NET_BROADCAST[6]={255,255,255,255,255,255};
+struct __attribute__((packed)) NetState {
+  uint8_t players,startLife,selected,activeTurn;
+  uint8_t playing,monarch,initiative,partnerMask,autoLife;
+  uint32_t turns,elapsedTurnMs;
+  int16_t life[4],poison[4],energy[4],tax[4],treasure[4],experience[4];
+  int16_t commander[4][2][4];
+};
+struct __attribute__((packed)) NetPacket {
+  uint32_t magic;
+  uint8_t version,type;
+  uint16_t pairingCode;
+  uint32_t session,sequence;
+  NetState state;
+};
+static_assert(sizeof(NetPacket)<=250,"ESP-NOW v1 packet cannot exceed 250 bytes");
+NetRole netRole=NET_OFF,netChoice=NET_HOST;
+uint16_t netPin=0,netEntry=0;
+uint8_t netDigit=0;
+uint32_t netSession=0,netSendSequence=0,netReceivedSequence=0;
+uint32_t netLastStateSent=0,netLastBeaconSent=0,netLastJoinSent=0,netLastSeen=0,netLastAckAt=0;
+uint32_t netAckSequence=0;
+bool netReady=false,netPaired=false,netDirty=false,netError=false;
+uint8_t netRemoteMac[6]={};
+NetPacket netLastSnapshot={};
+portMUX_TYPE netMux=portMUX_INITIALIZER_UNLOCKED;
+struct IncomingNetPacket {
+  NetPacket packet;
+  uint8_t mac[6];
+};
+IncomingNetPacket netQueue[4]={};
+volatile uint8_t netHead=0,netTail=0;
+volatile uint32_t netOverruns=0;
+
+void onEspNowReceive(const uint8_t *mac,const uint8_t *data,int len){
+  if(len!=(int)sizeof(NetPacket)||!mac||!data)return;
+  NetPacket input;
+  memcpy(&input,data,sizeof(input));
+  if(input.magic!=NET_MAGIC||input.version!=NET_VERSION)return;
+  if(input.type<NET_BEACON||input.type>NET_ACK)return;
+  portENTER_CRITICAL(&netMux);
+  uint8_t next=(netHead+1)%4;
+  if(next!=netTail){
+    netQueue[netHead].packet=input;
+    memcpy(netQueue[netHead].mac,mac,6);
+    netHead=next;
+  }else netOverruns++;
+  portEXIT_CRITICAL(&netMux);
+}
+bool netAddPeer(const uint8_t* mac){
+  if(esp_now_is_peer_exist(mac))return true;
+  esp_now_peer_info_t peer={};
+  memcpy(peer.peer_addr,mac,6);
+  peer.channel=NET_CHANNEL;
+  peer.ifidx=WIFI_IF_STA;
+  peer.encrypt=false;
+  return esp_now_add_peer(&peer)==ESP_OK;
+}
+NetState netCaptureState(){
+  NetState state={};
+  state.players=players;state.startLife=startLife;
+  state.selected=selected;state.activeTurn=activeTurn;
+  state.playing=playing;state.monarch=monarchOwner;
+  state.initiative=initiativeOwner;state.autoLife=commanderAutoLife;
+  state.turns=turnSteps;
+  state.elapsedTurnMs=millis()-turnStartedAt;
+  for(int p=0;p<4;p++){
+    state.life[p]=life[p];state.poison[p]=poison[p];
+    state.energy[p]=energy[p];state.tax[p]=tax[p];
+    state.treasure[p]=treasure[p];state.experience[p]=experience[p];
+    if(partnerEnabled[p])state.partnerMask|=(1<<p);
+  }
+  memcpy(state.commander,commanderMatrix,sizeof(commanderMatrix));
+  return state;
+}
+bool netSend(NetMsgType type,const uint8_t* addr,uint32_t sequence,bool includeState){
+  if(!netReady||!netAddPeer(addr))return false;
+  NetPacket packet={};
+  packet.magic=NET_MAGIC;packet.version=NET_VERSION;packet.type=type;
+  packet.pairingCode=netPin;packet.session=netSession;packet.sequence=sequence;
+  if(includeState)packet.state=netCaptureState();
+  esp_err_t err=esp_now_send(addr,(const uint8_t*)&packet,sizeof(packet));
+  if(type==NET_STATE && err==ESP_OK)netLastSnapshot=packet;
+  if(err!=ESP_OK)netError=true;
+  return err==ESP_OK;
+}
+void netStop(){
+  if(netReady)esp_now_deinit();
+  WiFi.mode(WIFI_OFF);
+  netReady=false;netRole=NET_OFF;netPaired=false;netError=false;
+  netLastSeen=0;netLastAckAt=0;netDirty=false;netReceivedSequence=0;
+  netHead=netTail=0;
+}
+bool netStart(NetRole role){
+  netStop();
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect(false,false);
+  if(esp_wifi_set_channel(NET_CHANNEL,WIFI_SECOND_CHAN_NONE)!=ESP_OK){
+    WiFi.mode(WIFI_OFF);netError=true;return false;
+  }
+  if(esp_now_init()!=ESP_OK){
+    WiFi.mode(WIFI_OFF);netError=true;return false;
+  }
+  esp_now_register_recv_cb(onEspNowReceive);
+  netReady=true;netRole=role;netError=false;netPaired=false;
+  netSession=(role==NET_HOST)?esp_random():0;
+  if(!netSession&&role==NET_HOST)netSession=1;
+  netPin=role==NET_HOST?(uint16_t)(1000+(esp_random()%9000)):netEntry;
+  netSendSequence=0;netReceivedSequence=0;netAckSequence=0;
+  netLastBeaconSent=netLastJoinSent=netLastStateSent=0;
+  netLastSeen=netLastAckAt=0;
+  memset(netRemoteMac,0,sizeof(netRemoteMac));
+  netDirty=true;
+  return netAddPeer(NET_BROADCAST);
+}
+bool netPacketPop(IncomingNetPacket &out){
+  bool got=false;
+  portENTER_CRITICAL(&netMux);
+  if(netTail!=netHead){
+    out=netQueue[netTail];netTail=(netTail+1)%4;got=true;
+  }
+  portEXIT_CRITICAL(&netMux);
+  return got;
+}
+void netApplyState(const NetState &state){
+  // Never trust unvalidated wireless sizes/indices.
+  if(state.players<1||state.players>4||state.activeTurn>=state.players||
+     state.selected>=state.players)return;
+  players=state.players;startLife=(state.startLife==20)?20:40;
+  playing=state.playing!=0;
+  selected=state.selected;activeTurn=state.activeTurn;
+  monarchOwner=(state.monarch<players)?state.monarch:255;
+  initiativeOwner=(state.initiative<players)?state.initiative:255;
+  turnSteps=state.turns;turnStartedAt=millis()-state.elapsedTurnMs;
+  commanderAutoLife=state.autoLife!=0;
+  for(int p=0;p<4;p++){
+    life[p]=constrain(state.life[p],-99,999);
+    poison[p]=constrain(state.poison[p],0,999);
+    energy[p]=constrain(state.energy[p],0,999);
+    tax[p]=constrain(state.tax[p],0,999);
+    treasure[p]=constrain(state.treasure[p],0,999);
+    experience[p]=constrain(state.experience[p],0,999);
+    partnerEnabled[p]=(state.partnerMask&(1<<p))!=0;
+  }
+  memcpy(commanderMatrix,state.commander,sizeof(commanderMatrix));
+  for(int p=0;p<4;p++)for(int c=0;c<2;c++)for(int t=0;t<4;t++)
+    commanderMatrix[p][c][t]=constrain(commanderMatrix[p][c][t],0,999);
+  // The mirror does not save remote game state into its own NVS or generate
+  // local history, which protects its previous standalone game.
+  clearUndo();
+  changePage(GAME);
+}
+void netHandlePacket(const IncomingNetPacket &received){
+  const NetPacket &packet=received.packet;
+  if(!netReady||packet.pairingCode!=netPin)return;
+  if(netRole==NET_HOST){
+    if(packet.type==NET_JOIN){
+      if(netPaired && memcmp(netRemoteMac,received.mac,6)!=0)return;
+      if(!netAddPeer(received.mac))return;
+      memcpy(netRemoteMac,received.mac,6);
+      netPaired=true;netLastSeen=millis();netDirty=true;
+    }else if(packet.type==NET_ACK&&netPaired&&
+             packet.session==netSession&&
+             memcmp(netRemoteMac,received.mac,6)==0){
+      if(packet.sequence>=netAckSequence){
+        netAckSequence=packet.sequence;netLastAckAt=millis();
+      }
+      netLastSeen=millis();
+    }
+  }else if(netRole==NET_VIEWER&&packet.type==NET_STATE&&packet.session!=0){
+    if(netPaired && (memcmp(netRemoteMac,received.mac,6)!=0 ||
+                     packet.session!=netSession))return;
+    if(!netPaired){
+      if(!netAddPeer(received.mac))return;
+      memcpy(netRemoteMac,received.mac,6);
+      netSession=packet.session;netPaired=true;netReceivedSequence=0;
+    }
+    netLastSeen=millis();
+    if(packet.sequence>netReceivedSequence){
+      netReceivedSequence=packet.sequence;
+      netApplyState(packet.state);
+    }
+    netSend(NET_ACK,netRemoteMac,netReceivedSequence,false);
+  }
+}
+void netPoll(){
+  if(!netReady)return;
+  IncomingNetPacket item;
+  for(int i=0;i<4&&netPacketPop(item);i++)netHandlePacket(item);
+  const uint32_t now=millis();
+  if(netRole==NET_HOST){
+    if(!netLastBeaconSent||(uint32_t)(now-netLastBeaconSent)>=1200){
+      netLastBeaconSent=now;netSend(NET_BEACON,NET_BROADCAST,0,false);
+    }
+    if(netPaired && (netDirty||
+        (uint32_t)(now-netLastStateSent)>=1100)){
+      if((uint32_t)(now-netLastStateSent)>=120){
+        netLastStateSent=now;
+        netSendSequence++;
+        netSend(NET_STATE,netRemoteMac,netSendSequence,true);
+        netDirty=false;
+      }
+    }
+    if(netPaired && (uint32_t)(now-netLastSeen)>8000){
+      netPaired=false;
+      netDirty=true;
+    }
+  }else if(netRole==NET_VIEWER){
+    if(!netPaired && (!netLastJoinSent||(uint32_t)(now-netLastJoinSent)>=1200)){
+      netLastJoinSent=now;
+      netSend(NET_JOIN,NET_BROADCAST,0,false);
+    }
+    if(netPaired && (uint32_t)(now-netLastSeen)>=4500){
+      netPaired=false;netSession=0;netReceivedSequence=0;
+      changePage(NETWORK);
+    }
+  }
+}
+void netChangeDigit(int amount){
+  static const int powers[]={1000,100,10,1};
+  const int power=powers[netDigit];
+  const int previous=(netEntry/power)%10;
+  const int next=(previous+amount%10+10)%10;
+  netEntry=(uint16_t)(netEntry+(next-previous)*power);
 }
 
 uint32_t lastChange=0, lastTouch=0, lastDiagnostics=0;
