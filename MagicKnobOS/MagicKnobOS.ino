@@ -8,6 +8,7 @@
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
+#include "NetTypes.h"
 
 // Magic Knob OS 2.0-alpha8 | ESP-NOW host / read-only spectator synchronization
 // Experimental firmware, NOT factory-complete. Do NOT flash to ESP32-U4WDH.
@@ -91,26 +92,6 @@ bool commanderKnockout(int target){
 // mirror. Single Wi-Fi channel and bounded packets (<250 bytes).
 // No password-based cryptography: four-digit matching code is a discovery
 // convenience, NOT secure authentication. Do not use for sensitive data.
-enum NetRole : uint8_t {NET_OFF=0, NET_HOST=1, NET_VIEWER=2};
-enum NetMsgType : uint8_t {NET_BEACON=1, NET_JOIN=2, NET_STATE=3, NET_ACK=4};
-constexpr uint32_t NET_MAGIC=0x4D4B4F53UL;
-constexpr uint8_t NET_VERSION=1, NET_CHANNEL=1;
-const uint8_t NET_BROADCAST[6]={255,255,255,255,255,255};
-struct __attribute__((packed)) NetState {
-  uint8_t players,startLife,selected,activeTurn;
-  uint8_t playing,monarch,initiative,partnerMask,autoLife;
-  uint32_t turns,elapsedTurnMs;
-  int16_t life[4],poison[4],energy[4],tax[4],treasure[4],experience[4];
-  int16_t commander[4][2][4];
-};
-struct __attribute__((packed)) NetPacket {
-  uint32_t magic;
-  uint8_t version,type;
-  uint16_t pairingCode;
-  uint32_t session,sequence;
-  NetState state;
-};
-static_assert(sizeof(NetPacket)<=250,"ESP-NOW v1 packet cannot exceed 250 bytes");
 NetRole netRole=NET_OFF,netChoice=NET_HOST;
 uint16_t netPin=0,netEntry=0;
 uint8_t netDigit=0;
@@ -123,10 +104,6 @@ NetPacket netLastSnapshot={};
 NetState netLocalBackup={};
 bool netBackupValid=false;
 portMUX_TYPE netMux=portMUX_INITIALIZER_UNLOCKED;
-struct IncomingNetPacket {
-  NetPacket packet;
-  uint8_t mac[6];
-};
 IncomingNetPacket netQueue[4]={};
 volatile uint8_t netHead=0,netTail=0;
 volatile uint32_t netOverruns=0;
