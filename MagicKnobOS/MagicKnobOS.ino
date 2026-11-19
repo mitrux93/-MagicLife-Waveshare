@@ -300,7 +300,11 @@ void drawOwners(){
   if(monarchOwner==255)strcpy(m,"-");else snprintf(m,sizeof(m),"P%u",monarchOwner+1);
   if(initiativeOwner==255)strcpy(i,"-");else snprintf(i,sizeof(i),"P%u",initiativeOwner+1);
   snprintf(s,sizeof(s),"MONARCA:%s  INIZIATIVA:%s",m,i);
-  lcd->fillRect(54,319,252,10,MK_DARK);
+  lcd->fillRect(54,306,252,24,MK_DARK);
+  for(int p=0;p<players;p++)if(commanderKnockout(p)){
+    char warn[24];snprintf(warn,sizeof(warn),"P%u: KO COMMANDER",p+1);
+    centered(warn,306,1,MK_RED);break;
+  }
   centered(s,320,1,MK_FAINT);
 }
 void drawHome(){
@@ -592,13 +596,38 @@ void undoLast(){
   if(u.kind==UNDO_LIFE){
     life[u.player]=u.before;
     knockout[u.player].active=false;
-    markSaved();changePage(GAME);
-  }else{
+    markSaved();recordEvent(EV_UNDO,u.player,u.player,0,0,0);
+    changePage(GAME);
+  }else if(u.kind==UNDO_COUNTER){
     counterFor(u.player,u.counter)=u.before;
-    selected=u.player;
-    selectedCounter=u.counter;
-    markSaved();changePage(COUNTERS);
+    selected=u.player;selectedCounter=u.counter;
+    markSaved();recordEvent(EV_UNDO,u.player,u.player,0,0,0);
+    changePage(COUNTERS);
+  }else if(u.kind==UNDO_COMMANDER){
+    commanderMatrix[u.source][u.slot][u.target]=u.before;
+    if(u.lifeApplied)life[u.target]=u.previousLife;
+    commanderSource=u.source;commanderTarget=u.target;commanderSlot=u.slot;
+    markSaved();recordEvent(EV_UNDO,u.source,u.target,u.slot,0,0);
+    changePage(COMMANDER_DAMAGE);
   }
+}
+void adjustCommanderDamage(int amount){
+  if(!playing||commanderSource>=players||commanderTarget>=players)return;
+  if(commanderSlot==1&&!partnerEnabled[commanderSource])return;
+  int16_t &value=commanderMatrix[commanderSource][commanderSlot][commanderTarget];
+  int before=value,after=constrain(before+amount,0,999);
+  if(before==after)return;
+  lastUndo.kind=UNDO_COMMANDER;lastUndo.source=commanderSource;
+  lastUndo.target=commanderTarget;lastUndo.slot=commanderSlot;
+  lastUndo.before=before;lastUndo.previousLife=life[commanderTarget];
+  lastUndo.previousSelected=selected;lastUndo.lifeApplied=commanderAutoLife;
+  value=after;
+  if(commanderAutoLife){
+    life[commanderTarget]=constrain((int)life[commanderTarget]-(after-before),-99,999);
+    lifeDirty=true;lifeDirtyMask|=(1<<commanderTarget);
+  }
+  recordEvent(EV_COMMANDER,commanderSource,commanderTarget,commanderSlot,before,after);
+  markSaved();drawCommanderValue();
 }
 void drawCounters(){
   base("SEGNALINI");
@@ -781,6 +810,8 @@ void render(){
     case HOME:drawHome();break;case SETUP:drawSetup();break;
     case GAME:drawGame();break;
     case GAME_MENU:drawGameMenu();break;
+    case COMMANDER_DAMAGE:drawCommanderDamage();break;
+    case HISTORY:drawHistory();break;
     case FIRST_PLAYER:drawFirstPlayer();break;
     case GAME_STATUS:drawGameStatus();break;
     case RESET_CONFIRM:drawResetConfirm();break;
@@ -811,6 +842,7 @@ void adjustLife(int p,int change) {
   }else if(updated>0){
     knockout[p].active=false;
   }
+  recordEvent(EV_LIFE,p,p,0,previous,updated);
   markSaved();lifeDirty=true;lifeDirtyMask|=(1<<p);
   // In Alpha 4 we redrew both focus frames on EVERY pulse; avoid that.
   if(selectionChanged)selectionDirty=true;
@@ -821,7 +853,9 @@ void adjustCounter(int amount) {
   if(updated==c)return;
   lastUndo.kind=UNDO_COUNTER;lastUndo.player=selected;lastUndo.counter=selectedCounter;
   lastUndo.before=c;lastUndo.previousSelected=selected;
-  c=updated;markSaved();counterDirty=true;
+  c=updated;
+  recordEvent(EV_COUNTER,selected,selected,(uint8_t)selectedCounter,lastUndo.before,updated);
+  markSaved();counterDirty=true;
 }
 bool readTouch(int &x,int &y) {
   Wire.beginTransmission(TOUCH_ADDR);Wire.write((uint8_t)0x01);
