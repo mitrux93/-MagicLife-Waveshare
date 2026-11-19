@@ -236,14 +236,9 @@ void lifeArea(int p){
                  life[p]<=5?MK_GOLD:(p==0?MK_BLUE:MK_AMBER);
   printAt(buf,x,baseline,size,color);
   lcd->drawRoundRect(106,y,148,58,12,life[p]<=0?MK_RED:MK_PANEL);
-  // Only touch the KO badge if the zero boundary changes. During ordinary
-  // life updates the badge is left as-is and no additional pixels are drawn.
-  static bool badgeShown[2]={false,false};
-  const bool shouldShow=life[p]<=0;
-  if(badgeShown[p]!=shouldShow){
-    knockoutBadge(p,MK_RED);
-    badgeShown[p]=shouldShow;
-  }
+  // Always refresh the small badge area: this remains correct even when
+  // returning from menus or starting a new game.
+  knockoutBadge(p,MK_RED);
 }
 void paintSelection(){
   if(players!=2)return;
