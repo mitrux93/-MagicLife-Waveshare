@@ -6,7 +6,7 @@
 #include <driver/gpio.h>
 #include <string.h>
 
-// Magic Knob OS 2.0-alpha6 | per-source Commander damage, partners and session timeline
+// Magic Knob OS 2.0-alpha7 | 3-4 player circular split UI and cross-direction encoder filter
 // Experimental firmware, NOT factory-complete. Do NOT flash to ESP32-U4WDH.
 // Patched ST77916 V2 library required, see GitHub Actions workflow.
 constexpr int PIN_CS=14, PIN_CLK=13, PIN_D0=15, PIN_D1=16, PIN_D2=17, PIN_D3=18;
@@ -94,6 +94,11 @@ volatile int32_t knobDelta=0;
 volatile uint32_t rawA=0, rawB=0;
 volatile uint32_t rawAFalling=0, rawARising=0, rawBFalling=0, rawBRising=0;
 volatile uint32_t lastPulseA=0, lastPulseB=0;
+volatile uint32_t lastAcceptedUs=0, rejectedCrossA=0, rejectedCrossB=0;
+volatile uint32_t rejectedBounceA=0, rejectedBounceB=0;
+volatile uint8_t lastAcceptedDir=0; // 0 none, 1 right, 2 left
+volatile uint8_t crossLockMs=16; // Adjustable: 0, 8, 16, 32 ms
+portMUX_TYPE knobMux=portMUX_INITIALIZER_UNLOCKED;
 volatile bool clockwiseRising=true;
 int32_t pulseAccumulator=0;
 bool touchActive=false, swipeAlreadyHandled=false;
@@ -105,33 +110,57 @@ uint32_t mkTimerStartedAt=0, timerElapsed=0;
 uint32_t randomValue=0;
 char toolResult[24]="Pronto";
 
-// Two independent active-low direction pulses, NOT quadrature.
-// GPIO8 = clockwise, GPIO7 = anticlockwise. Count both physical edges for
-// diagnostics but apply exactly ONE selected edge per detent to the game.
-// The right-hand direction defaults to RISING, as in another field-tested
-// Waveshare implementation; LEFT remains the previously reliable FALLING.
-// The CW mode can be changed in Settings > Knob without reflashing.
+// The two GPIO pins are separate directional pulse lines, not a quadrature
+// encoder. Count both signal edges for diagnostics; only the configured active
+// edge enters the lifetime filter. Rejections never reach knobDelta.
+// Cross-direction suppression is a hypothesis to test on actual hardware,
+// not a replacement for the independent 2400 us same-channel debounce.
 constexpr uint32_t PULSE_DEBOUNCE_US=2400;
 void IRAM_ATTR countClockwiseEdge(uint32_t t) {
-  if((uint32_t)(t-lastPulseA)<PULSE_DEBOUNCE_US)return;
-  lastPulseA=t;rawA++;knobDelta++;
+  portENTER_CRITICAL_ISR(&knobMux);
+  if((uint32_t)(t-lastPulseA)<PULSE_DEBOUNCE_US){
+    rejectedBounceA++;
+  }else{
+    lastPulseA=t;
+    if(lastAcceptedDir==2 && crossLockMs>0 &&
+       (uint32_t)(t-lastAcceptedUs)<(uint32_t)crossLockMs*1000U){
+      rejectedCrossA++;
+    }else{
+      lastAcceptedDir=1;lastAcceptedUs=t;rawA++;knobDelta++;
+    }
+  }
+  portEXIT_CRITICAL_ISR(&knobMux);
 }
 void IRAM_ATTR countCounterclockwiseEdge(uint32_t t) {
-  if((uint32_t)(t-lastPulseB)<PULSE_DEBOUNCE_US)return;
-  lastPulseB=t;rawB++;knobDelta--;
+  portENTER_CRITICAL_ISR(&knobMux);
+  if((uint32_t)(t-lastPulseB)<PULSE_DEBOUNCE_US){
+    rejectedBounceB++;
+  }else{
+    lastPulseB=t;
+    if(lastAcceptedDir==1 && crossLockMs>0 &&
+       (uint32_t)(t-lastAcceptedUs)<(uint32_t)crossLockMs*1000U){
+      rejectedCrossB++;
+    }else{
+      lastAcceptedDir=2;lastAcceptedUs=t;rawB++;knobDelta--;
+    }
+  }
+  portEXIT_CRITICAL_ISR(&knobMux);
 }
-void IRAM_ATTR knobClockwise() {
+void IRAM_ATTR knobClockwise(){
   const uint32_t t=micros();
   const bool high=gpio_get_level((gpio_num_t)PIN_A)!=0;
-  if(high)rawARising++;
-  else rawAFalling++;
-  if(high==clockwiseRising)countClockwiseEdge(t);
+  portENTER_CRITICAL_ISR(&knobMux);
+  if(high)rawARising++;else rawAFalling++;
+  const bool active=high==clockwiseRising;
+  portEXIT_CRITICAL_ISR(&knobMux);
+  if(active)countClockwiseEdge(t);
 }
-void IRAM_ATTR knobCounterclockwise() {
+void IRAM_ATTR knobCounterclockwise(){
   const uint32_t t=micros();
   const bool high=gpio_get_level((gpio_num_t)PIN_B)!=0;
-  if(high)rawBRising++;
-  else rawBFalling++;
+  portENTER_CRITICAL_ISR(&knobMux);
+  if(high)rawBRising++;else rawBFalling++;
+  portEXIT_CRITICAL_ISR(&knobMux);
   if(!high)countCounterclockwiseEdge(t);
 }
 void markSaved() {needsSave=true; lastChange=millis();}
@@ -167,6 +196,7 @@ void persist() {
   store.putUChar("players",players);store.putUChar("initial",startLife);
   store.putUChar("bright",brightness);store.putUChar("pulseDiv",knobDivider);
   store.putBool("reverse",invertKnob);store.putBool("cwRise",clockwiseRising);store.putBool("playing",playing);
+  store.putUChar("crossMs",crossLockMs);
   store.putUChar("focused",selected);store.putUChar("turnPlayer",activeTurn);
   store.putUInt("turnSteps",turnSteps);store.putUChar("monarch",monarchOwner);
   store.putUChar("initiative",initiativeOwner);
@@ -195,6 +225,8 @@ void load() {
   knobDivider=constrain((int)store.getUChar("pulseDiv",1),1,4);
   invertKnob=store.getBool("reverse",false);
   clockwiseRising=store.getBool("cwRise",true);
+  uint8_t crossSetting=store.getUChar("crossMs",16);
+  crossLockMs=(crossSetting==0||crossSetting==8||crossSetting==16||crossSetting==32)?crossSetting:16;
   playing=store.getBool("playing",false);
   selected=constrain((int)store.getUChar("focused",0),0,(int)players-1);
   activeTurn=constrain((int)store.getUChar("turnPlayer",0),0,(int)players-1);
@@ -749,23 +781,25 @@ void displayValues(){
 }
 void drawKnobSettings(){
   base("GHIERA");
-  centered("DIREZIONE",77,2,MK_FAINT);
-  uiButton(80,96,200,37,invertKnob?"INVERTITA":"NORMALE",2);
-  centered("SENSIBILITA",142,2,MK_FAINT);
-  uiButton(76,163,60,43,"-",3);
-  uiButton(224,163,60,43,"+",3);
-  char buf[8];snprintf(buf,sizeof(buf),"%u",knobDivider);
-  centered(buf,172,3,MK_GOLD);
-  centered("1 = uno scatto per vita",212,1,MK_FAINT);
-  centered("SCATTO VERSO DESTRA",236,1,MK_GOLD);
-  uiButton(79,251,202,35,clockwiseRising?"FRONTE SALITA":"FRONTE DISCESA",1);
-  uiButton(112,293,136,34,"INDIETRO",2);
+  centered("DIREZIONE",73,1,MK_FAINT);
+  uiButton(85,89,190,35,invertKnob?"INVERTITA":"NORMALE",2);
+  centered("SCATTI PER VITA",134,1,MK_FAINT);
+  uiButton(80,148,58,38,"-",3);
+  uiButton(222,148,58,38,"+",3);
+  char buf[16];snprintf(buf,sizeof(buf),"%u",knobDivider);
+  centered(buf,156,3,MK_GOLD);
+  centered("FRONTE DESTRA",195,1,MK_FAINT);
+  uiButton(83,209,194,32,clockwiseRising?"SALITA":"DISCESA",2);
+  centered("FILTRO INCROCI",248,1,MK_FAINT);
+  snprintf(buf,sizeof(buf),"%u MS",crossLockMs);
+  uiButton(95,260,170,30,buf,2,crossLockMs?MK_BLUE:MK_PANEL);
+  uiButton(113,301,134,28,"INDIETRO",1);
 }
 void knobValues(){
   if(page!=KNOB_SETTINGS)return;
-  lcd->fillRect(145,164,70,42,MK_DARK);
+  lcd->fillRect(147,148,66,37,MK_DARK);
   char buf[8];snprintf(buf,sizeof(buf),"%u",knobDivider);
-  centered(buf,173,3,MK_GOLD);
+  centered(buf,156,3,MK_GOLD);
 }
 
 void drawBattery(){
@@ -787,30 +821,43 @@ void updateBatteryDisplay(){
   centered("NON E' LA CARICA BATTERIA",214,1,MK_AMBER);
   centered("Percentuale: non misurata",239,1,MK_FAINT);
 }
+
 void drawDiagnostics(){
   base("DIAGNOSTICA");
-  centered("RUOTA UN SOLO SCATTO",77,1,MK_FAINT);
+  centered("RUOTA SOLO A DESTRA",74,1,MK_FAINT);
   uiButton(58,278,116,42,"AZZERA",2);
   uiButton(184,278,116,42,"INDIETRO",1);
 }
 void redrawDiagnostics(){
   if(page!=DIAG)return;
-  uint32_t a,b,af,ar,bf,br;
-  noInterrupts();
+  uint32_t a,b,af,ar,bf,br,ca,cb,ba,bb;
+  uint8_t lockMs;
+  portENTER_CRITICAL(&knobMux);
   a=rawA;b=rawB;af=rawAFalling;ar=rawARising;
   bf=rawBFalling;br=rawBRising;
-  interrupts();
-  lcd->fillRect(52,99,256,169,MK_DARK);
-  char s[48];
-  snprintf(s,sizeof(s),"DESTRA: %lu",(unsigned long)a);
-  centered(s,107,2,MK_BLUE);
-  snprintf(s,sizeof(s),"GIU:%lu  SU:%lu",(unsigned long)af,(unsigned long)ar);
-  centered(s,139,1,MK_FAINT);
-  snprintf(s,sizeof(s),"SINISTRA: %lu",(unsigned long)b);
-  centered(s,171,2,MK_AMBER);
-  snprintf(s,sizeof(s),"GIU:%lu  SU:%lu",(unsigned long)bf,(unsigned long)br);
-  centered(s,203,1,MK_FAINT);
-  centered(clockwiseRising?"DESTRA: SALITA":"DESTRA: DISCESA",237,1,MK_GOLD);
+  ca=rejectedCrossA;cb=rejectedCrossB;
+  ba=rejectedBounceA;bb=rejectedBounceB;
+  lockMs=crossLockMs;
+  portEXIT_CRITICAL(&knobMux);
+  lcd->fillRect(52,94,256,175,MK_DARK);
+  char s[58];
+  snprintf(s,sizeof(s),"DESTRA OK: %lu",(unsigned long)a);
+  centered(s,99,2,MK_BLUE);
+  snprintf(s,sizeof(s),"su:%lu giu:%lu  X:%lu R:%lu",
+           (unsigned long)ar,(unsigned long)af,
+           (unsigned long)ca,(unsigned long)ba);
+  centered(s,129,1,MK_FAINT);
+  lcd->drawFastHLine(77,153,206,MK_PANEL2);
+  snprintf(s,sizeof(s),"SINISTRA OK: %lu",(unsigned long)b);
+  centered(s,161,2,MK_AMBER);
+  snprintf(s,sizeof(s),"su:%lu giu:%lu  X:%lu R:%lu",
+           (unsigned long)br,(unsigned long)bf,
+           (unsigned long)cb,(unsigned long)bb);
+  centered(s,192,1,MK_FAINT);
+  snprintf(s,sizeof(s),"X = incroci   R = rimbalzi");
+  centered(s,223,1,MK_FAINT);
+  snprintf(s,sizeof(s),"BLOCCO %u MS | DX %s",lockMs,clockwiseRising?"SALITA":"DISCESA");
+  centered(s,247,1,MK_GOLD);
 }
 void render(){
   switch(page) {
@@ -1044,25 +1091,33 @@ void touchAction(int x,int y){
     else if(within(x,y,220,163,282,215)){brightness=min(255,(int)brightness+15);setBrightness();markSaved();displayValues();}
     else if(within(x,y,109,280,251,317))changePage(SETTINGS);
   } else if(page==KNOB_SETTINGS){
-    if(within(x,y,80,96,280,133)){invertKnob=!invertKnob;markSaved();fresh=true;}
-    else if(within(x,y,76,163,136,206)){knobDivider=max(1,(int)knobDivider-1);markSaved();knobValues();}
-    else if(within(x,y,224,163,284,206)){knobDivider=min(4,(int)knobDivider+1);markSaved();knobValues();}
-    else if(within(x,y,79,251,281,286)){
-      noInterrupts();
-      clockwiseRising=!clockwiseRising;
-      lastPulseA=micros();
-      interrupts();
+    if(within(x,y,85,89,275,124)){invertKnob=!invertKnob;markSaved();fresh=true;}
+    else if(within(x,y,80,148,138,186)){knobDivider=max(1,(int)knobDivider-1);markSaved();knobValues();}
+    else if(within(x,y,222,148,280,186)){knobDivider=min(4,(int)knobDivider+1);markSaved();knobValues();}
+    else if(within(x,y,83,209,277,241)){
+      portENTER_CRITICAL(&knobMux);
+      clockwiseRising=!clockwiseRising;lastPulseA=micros();
+      portEXIT_CRITICAL(&knobMux);
+      markSaved();fresh=true;
+    }else if(within(x,y,95,260,265,290)){
+      portENTER_CRITICAL(&knobMux);
+      crossLockMs=crossLockMs==0?8:(crossLockMs==8?16:(crossLockMs==16?32:0));
+      lastAcceptedDir=0;
+      portEXIT_CRITICAL(&knobMux);
       markSaved();fresh=true;
     }
-    else if(within(x,y,112,293,248,327))changePage(SETTINGS);
+    else if(within(x,y,113,301,247,329))changePage(SETTINGS);
   } else if(page==BATTERY){
     if(within(x,y,106,285,254,322))changePage(SETTINGS);
   } else if(page==DIAG){
     if(within(x,y,58,278,174,320)){
-      noInterrupts();
+      portENTER_CRITICAL(&knobMux);
       rawA=rawB=rawAFalling=rawARising=rawBFalling=rawBRising=0;
-      interrupts();
-      redrawDiagnostics();
+      rejectedCrossA=rejectedCrossB=rejectedBounceA=rejectedBounceB=0;
+      lastPulseA=lastPulseB=lastAcceptedUs=0;lastAcceptedDir=0;
+      knobDelta=0;
+      portEXIT_CRITICAL(&knobMux);
+      pulseAccumulator=0;redrawDiagnostics();
     }else if(within(x,y,184,278,300,320))changePage(SETTINGS);
   }
 }
@@ -1090,7 +1145,9 @@ void setup(){
   setBrightness();
 }
 void loop(){
-  noInterrupts();int32_t amount=knobDelta;knobDelta=0;interrupts();
+  portENTER_CRITICAL(&knobMux);
+  int32_t amount=knobDelta;knobDelta=0;
+  portEXIT_CRITICAL(&knobMux);
   if(amount!=0){
     if(invertKnob)amount=-amount;
     pulseAccumulator+=amount;
