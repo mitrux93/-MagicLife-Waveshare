@@ -6,7 +6,7 @@
 #include <driver/gpio.h>
 #include <string.h>
 
-// Magic Knob OS 2.0-alpha3 | centered counters, settings hub, battery monitor
+// Magic Knob OS 2.0-alpha4 | dual-player HUD, KO animation, confirmed reset
 // Experimental firmware, NOT factory-complete. Do NOT flash to ESP32-U4WDH.
 // Patched ST77916 V2 library required, see GitHub Actions workflow.
 constexpr int PIN_CS=14, PIN_CLK=13, PIN_D0=15, PIN_D1=16, PIN_D2=17, PIN_D3=18;
@@ -19,7 +19,7 @@ Preferences store;
 constexpr uint16_t MK_DARK=0x0862, MK_PANEL=0x18e4, MK_PANEL2=0x2165, MK_GOLD=0xd587;
 constexpr uint16_t MK_FAINT=0x732d, MK_WHITE=0xf79e, MK_BLUE=0x3d9d, MK_AMBER=0xfbc5;
 constexpr uint16_t MK_RED=0xf2c5, MK_GREEN=0x5e0c;
-enum Page : uint8_t {HOME, SETUP, GAME, COUNTERS, TOOLS, ROLL, TIMER, SETTINGS, DISPLAY_SETTINGS, KNOB_SETTINGS, BATTERY, DIAG};
+enum Page : uint8_t {HOME, SETUP, GAME, RESET_CONFIRM, COUNTERS, TOOLS, ROLL, TIMER, SETTINGS, DISPLAY_SETTINGS, KNOB_SETTINGS, BATTERY, DIAG};
 enum RollType : uint8_t {ROLL_D6, ROLL_D20, ROLL_COIN};
 RollType rollType=ROLL_D20;
 Page page=HOME;
@@ -28,6 +28,13 @@ CounterType selectedCounter=POISON;
 uint8_t players=2, startLife=40, selected=0, brightness=210;
 uint8_t knobDivider=1;
 bool invertKnob=false, playing=false, fresh=true, lifeDirty=false, selectionDirty=false, counterDirty=false;
+uint8_t lifeDirtyMask=0x03;
+struct KnockoutEffect {
+  bool active=false;
+  uint8_t frame=255;
+  uint32_t started=0;
+};
+KnockoutEffect knockout[2];
 int16_t life[2]={40,40}, poison[2]={0,0}, energy[2]={0,0}, tax[2]={0,0}, cmdDamage[2]={0,0};
 uint32_t lastChange=0, lastTouch=0, lastDiagnostics=0;
 uint32_t lastBatteryRead=0;
@@ -86,7 +93,11 @@ void base(const char *title) {
   lcd->drawFastHLine(93,64,174,MK_PANEL2);
   if(page!=HOME)centered("SWIPE > HOME",342,1,MK_FAINT);
 }
-void changePage(Page next) {page=next;fresh=true;lifeDirty=true;selectionDirty=true;counterDirty=true;}
+void changePage(Page next) {
+  if(next!=GAME)for(auto &fx:knockout)fx.active=false;
+  page=next;fresh=true;lifeDirty=true;lifeDirtyMask=0x03;
+  selectionDirty=true;counterDirty=true;
+}
 void persist() {
   store.putUChar("players",players);store.putUChar("initial",startLife);
   store.putUChar("bright",brightness);store.putUChar("pulseDiv",knobDivider);
@@ -148,11 +159,14 @@ int batteryPercentApprox(float voltage){
   return 100;
 }
 void newGame() {
-  for(int i=0;i<2;i++){life[i]=startLife;poison[i]=0;energy[i]=0;tax[i]=0;cmdDamage[i]=0;}
+  for(int i=0;i<2;i++){
+    life[i]=startLife;poison[i]=0;energy[i]=0;tax[i]=0;cmdDamage[i]=0;
+    knockout[i].active=false;
+  }
   selected=0;playing=true;markSaved();changePage(GAME);
 }
 void drawHome(){
-  base("MAGIC KNOB OS");centered("2.0 ALPHA 3",77,2,MK_FAINT);
+  base("MAGIC KNOB OS");centered("2.0 ALPHA 4",77,2,MK_FAINT);
   uiButton(90,111,180,54,"MAGIC",3,0x10c4);
   uiButton(90,174,180,42,"NUOVA",2);
   uiButton(90,222,180,42,"STRUMENTI",2);
@@ -174,36 +188,119 @@ void plusMinus(int x,int y,bool plus,uint16_t color) {
   lcd->fillRect(x-11,y-2,22,4,MK_WHITE);
   if(plus) lcd->fillRect(x-2,y-11,4,22,MK_WHITE);
 }
+// A fixed, symmetrical two-player layout. Only numbers, badges and focus
+// strokes are updated during play; the whole screen is never redrawn per life.
+void duelButton(int x,int y,bool plus,uint16_t accent){
+  lcd->fillCircle(x,y,22,MK_DARK);
+  lcd->drawCircle(x,y,21,accent);
+  lcd->drawCircle(x,y,18,MK_PANEL2);
+  lcd->fillRect(x-10,y-2,20,4,MK_WHITE);
+  if(plus)lcd->fillRect(x-2,y-10,4,20,MK_WHITE);
+}
+void duelPanel(int p){
+  const int y=(p==0)?75:215;
+  const uint16_t accent=p==0?MK_BLUE:MK_AMBER;
+  lcd->fillRoundRect(51,y,258,96,18,MK_PANEL);
+  lcd->drawRoundRect(51,y,258,96,18,accent);
+  lcd->drawFastHLine(124,y+30,112,MK_PANEL2);
+  lcd->drawLine(180,y+32,180,y+34,MK_GOLD);
+  duelButton(78,y+67,false,accent);
+  duelButton(282,y+67,true,accent);
+}
+void knockoutBadge(int p,uint16_t color){
+  if(players!=2)return;
+  const int y=(p==0)?84:224;
+  lcd->fillRoundRect(251,y,39,21,7,MK_PANEL);
+  if(life[p]>0)return;
+  lcd->fillRoundRect(251,y,39,21,7,color);
+  printAt("KO",263,y+7,1,MK_DARK);
+}
 void lifeArea(int p){
-  const int y=players==1?133:(p==0?93:251);
-  const int size=players==1?8:5;
-  int h=players==1?82:55;
-  lcd->fillRect(95,y,170,h,MK_DARK);
   char buf[16];snprintf(buf,sizeof(buf),"%d",life[p]);
-  centered(buf,y+3,size,life[p]<=0?MK_RED:(p==0?MK_BLUE:MK_AMBER));
+  if(players==1){
+    lcd->fillRect(95,133,170,82,MK_DARK);
+    centered(buf,136,8,life[p]<=0?MK_RED:MK_BLUE);
+    return;
+  }
+  const int y=p==0?109:249;
+  // The KO outline and number are inside this small reusable region.
+  lcd->fillRoundRect(106,y,148,58,12,MK_PANEL);
+  int digits=strlen(buf);
+  int size=digits<=2?6:(digits==3?5:4);
+  int x=180-(digits*6*size)/2;
+  int baseline=y+(58-8*size)/2;
+  uint16_t color=life[p]<=0?MK_RED:
+                 life[p]<=5?MK_GOLD:(p==0?MK_BLUE:MK_AMBER);
+  printAt(buf,x,baseline,size,color);
+  if(life[p]<=0){
+    lcd->drawRoundRect(106,y,148,58,12,MK_RED);
+  }
+  knockoutBadge(p,MK_RED);
 }
 void paintSelection(){
-  if(players==1)return;
-  lcd->fillRect(127,76,110,18,MK_DARK);
-  lcd->fillRect(127,232,110,18,MK_DARK);
-  centered(selected==0?"[P1]":" P1 ",78,2,selected==0?MK_GOLD:MK_BLUE);
-  centered(selected==1?"[P2]":" P2 ",234,2,selected==1?MK_GOLD:MK_AMBER);
+  if(players!=2)return;
+  for(int p=0;p<2;p++){
+    const int y=p==0?75:215;
+    uint16_t accent=p==0?MK_BLUE:MK_AMBER;
+    lcd->drawRoundRect(50,y-1,260,98,19,
+                       selected==p?MK_GOLD:accent);
+    lcd->fillRoundRect(146,y+7,68,25,10,
+                       selected==p?MK_PANEL2:MK_PANEL);
+    printAt(p==0?"P1":"P2",168,y+12,2,
+            selected==p?MK_GOLD:accent);
+  }
+}
+void drawKOFrame(int p,uint8_t frame){
+  if(players!=2||page!=GAME)return;
+  const int y=p==0?109:249;
+  const uint16_t pulse[8]={
+    MK_RED,MK_GOLD,MK_RED,MK_PANEL2,
+    MK_RED,MK_GOLD,MK_RED,MK_RED
+  };
+  uint16_t shade=pulse[frame<8?frame:7];
+  lcd->drawRoundRect(106,y,148,58,12,shade);
+  knockoutBadge(p,shade);
+}
+void updateKOAnimations(){
+  if(page!=GAME||players!=2)return;
+  uint32_t now=millis();
+  for(int p=0;p<2;p++){
+    KnockoutEffect &fx=knockout[p];
+    if(!fx.active)continue;
+    if(life[p]>0){fx.active=false;continue;}
+    uint8_t next=(uint8_t)min((uint32_t)7,
+                   (uint32_t)((now-fx.started)/100));
+    if(next!=fx.frame){fx.frame=next;drawKOFrame(p,next);}
+    if((uint32_t)(now-fx.started)>=800){
+      fx.active=false;drawKOFrame(p,7);
+    }
+  }
 }
 void drawGame(){
-  base(players==1?"MAGIC LIFE":"2 GIOCATORI");
+  base("MAGIC LIFE");
   if(players==1){
     centered("GIOCATORE 1",96,2,MK_BLUE);
     plusMinus(58,184,false,MK_RED);plusMinus(302,184,true,MK_GREEN);
     uiButton(65,278,95,38,"CONT.",2);
     uiButton(199,278,95,38,"MENU",2);
   }else{
-    lcd->drawFastHLine(81,179,198,MK_GOLD);
-    plusMinus(58,116,false,MK_BLUE);plusMinus(302,116,true,MK_BLUE);
-    plusMinus(58,288,false,MK_AMBER);plusMinus(302,288,true,MK_AMBER);
-    uiButton(104,160,70,36,"CONT",1);
-    uiButton(185,160,70,36,"MENU",1);
+    // Balanced panels for one screen viewed by two players.
+    duelPanel(0);duelPanel(1);
+    lcd->drawFastHLine(89,194,182,MK_GOLD);
+    uiButton(58,178,79,32,"SEGN.",2,MK_PANEL);
+    uiButton(142,178,78,32,"RESET",2,MK_PANEL);
+    uiButton(225,178,77,32,"MENU",2,MK_PANEL);
   }
-  lifeArea(0);if(players==2)lifeArea(1);paintSelection();
+  lifeArea(0);if(players==2)lifeArea(1);
+  paintSelection();
+}
+void drawResetConfirm(){
+  base("RESET PARTITA");
+  centered("RICOMINCIARE?",107,2,MK_GOLD);
+  centered("Vite e segnalini",148,2,MK_WHITE);
+  centered("saranno azzerati.",173,2,MK_FAINT);
+  uiButton(65,224,108,51,"ANNULLA",1,MK_PANEL2);
+  uiButton(187,224,108,51,"CONFERMA",1,MK_RED);
 }
 const char* counterName(){switch(selectedCounter){
   case POISON:return "VELENO";case ENERGY:return "ENERGIA";
@@ -372,7 +469,8 @@ void redrawDiagnostics(){
 void render(){
   switch(page) {
     case HOME:drawHome();break;case SETUP:drawSetup();break;
-    case GAME:drawGame();break;case COUNTERS:drawCounters();break;
+    case GAME:drawGame();break;case RESET_CONFIRM:drawResetConfirm();break;
+    case COUNTERS:drawCounters();break;
     case TOOLS:drawTools();break;case ROLL:drawRoll();break;case TIMER:drawTimer();break;
     case SETTINGS:drawSettings();break;
     case DISPLAY_SETTINGS:drawDisplaySettings();break;
@@ -384,8 +482,19 @@ void render(){
 }
 void adjustLife(int p,int change) {
   if(!playing||p>=players)return;
-  life[p]=constrain((int)life[p]+change,-99,999);selected=p;
-  markSaved();lifeDirty=true;selectionDirty=true;
+  const int previous=life[p];
+  const int updated=constrain(previous+change,-99,999);
+  if(updated==previous)return;
+  life[p]=updated;selected=p;
+  // Trigger once on crossing >0 to <=0. Never trigger again below zero.
+  if(previous>0 && updated<=0 && players==2){
+    knockout[p].active=true;
+    knockout[p].frame=255;
+    knockout[p].started=millis();
+  }else if(updated>0){
+    knockout[p].active=false;
+  }
+  markSaved();lifeDirty=true;lifeDirtyMask|=(1<<p);selectionDirty=true;
 }
 void adjustCounter(int amount) {
   int16_t &c=currentCounter();
@@ -423,15 +532,19 @@ void touchAction(int x,int y){
       else if(within(x,y,65,278,160,316))changePage(COUNTERS);
       else if(within(x,y,199,278,294,316))changePage(HOME);
     }else{
-      if(near(x,y,58,116))adjustLife(0,-1);
-      else if(near(x,y,302,116))adjustLife(0,1);
-      else if(near(x,y,58,288))adjustLife(1,-1);
-      else if(near(x,y,302,288))adjustLife(1,1);
-      else if(within(x,y,104,160,174,196))changePage(COUNTERS);
-      else if(within(x,y,185,160,255,196))changePage(HOME);
-      else if(y>65&&y<150){selected=0;selectionDirty=true;}
-      else if(y>225&&y<325){selected=1;selectionDirty=true;}
+      if(near(x,y,78,142))adjustLife(0,-1);
+      else if(near(x,y,282,142))adjustLife(0,1);
+      else if(near(x,y,78,282))adjustLife(1,-1);
+      else if(near(x,y,282,282))adjustLife(1,1);
+      else if(within(x,y,58,178,137,210))changePage(COUNTERS);
+      else if(within(x,y,142,178,220,210))changePage(RESET_CONFIRM);
+      else if(within(x,y,225,178,302,210))changePage(HOME);
+      else if(within(x,y,99,76,260,171)){selected=0;selectionDirty=true;}
+      else if(within(x,y,99,215,260,311)){selected=1;selectionDirty=true;}
     }
+  } else if(page==RESET_CONFIRM){
+    if(within(x,y,65,224,173,275))changePage(GAME);
+    else if(within(x,y,187,224,295,275))newGame();
   } else if(page==COUNTERS){
     if(within(x,y,65,94,175,133)){selected=0;fresh=true;}
     else if(players==2&&within(x,y,185,94,295,133)){selected=1;fresh=true;}
@@ -546,8 +659,15 @@ void loop(){
   }
   if(fresh)render();
   else {
-    if(page==GAME){if(lifeDirty){lifeArea(0);if(players==2)lifeArea(1);lifeDirty=false;}
-      if(selectionDirty){paintSelection();selectionDirty=false;}}
+    if(page==GAME){
+      if(lifeDirty){
+        if(lifeDirtyMask&0x01)lifeArea(0);
+        if(players==2 && (lifeDirtyMask&0x02))lifeArea(1);
+        lifeDirty=false;lifeDirtyMask=0;
+      }
+      if(selectionDirty){paintSelection();selectionDirty=false;}
+      updateKOAnimations();
+    }
     else if(page==COUNTERS&&counterDirty){redrawCounter();counterDirty=false;}
     if(page==TIMER&&millis()-lastDiagnostics>300){lastDiagnostics=millis();repaintTimer();}
     if(page==DIAG&&millis()-lastDiagnostics>250){lastDiagnostics=millis();redrawDiagnostics();}
