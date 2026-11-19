@@ -6,7 +6,7 @@
 #include <driver/gpio.h>
 #include <string.h>
 
-// Magic Knob OS 2.0-alpha4.1 | optimized input-to-display latency
+// Magic Knob OS 2.0-alpha4.2 | CW rising-edge option and independent pulse diagnostics
 // Experimental firmware, NOT factory-complete. Do NOT flash to ESP32-U4WDH.
 // Patched ST77916 V2 library required, see GitHub Actions workflow.
 constexpr int PIN_CS=14, PIN_CLK=13, PIN_D0=15, PIN_D1=16, PIN_D2=17, PIN_D3=18;
@@ -45,7 +45,9 @@ uint32_t lastSelectionPaintAt=0;
 bool needsSave=false;
 volatile int32_t knobDelta=0;
 volatile uint32_t rawA=0, rawB=0;
+volatile uint32_t rawAFalling=0, rawARising=0, rawBFalling=0, rawBRising=0;
 volatile uint32_t lastPulseA=0, lastPulseB=0;
+volatile bool clockwiseRising=true;
 int32_t pulseAccumulator=0;
 bool touchActive=false, swipeAlreadyHandled=false;
 int touchStartX=0, touchStartY=0, touchEndX=0, touchEndY=0;
@@ -56,20 +58,34 @@ uint32_t mkTimerStartedAt=0, timerElapsed=0;
 uint32_t randomValue=0;
 char toolResult[24]="Pronto";
 
-// Two independent active-low direction contacts, NOT a quadrature encoder.
-// GPIO8 = clockwise; GPIO7 = anticlockwise (user can reverse in Settings).
-// FALLING ISR catches short pulses that the main loop can miss.
-// Separate short dead-time per pin suppresses contact bounce.
+// Two independent active-low direction pulses, NOT quadrature.
+// GPIO8 = clockwise, GPIO7 = anticlockwise. Count both physical edges for
+// diagnostics but apply exactly ONE selected edge per detent to the game.
+// The right-hand direction defaults to RISING, as in another field-tested
+// Waveshare implementation; LEFT remains the previously reliable FALLING.
+// The CW mode can be changed in Settings > Knob without reflashing.
 constexpr uint32_t PULSE_DEBOUNCE_US=2400;
-void IRAM_ATTR knobClockwise() {
-  uint32_t t=micros();
+void IRAM_ATTR countClockwiseEdge(uint32_t t) {
   if((uint32_t)(t-lastPulseA)<PULSE_DEBOUNCE_US)return;
   lastPulseA=t;rawA++;knobDelta++;
 }
-void IRAM_ATTR knobCounterclockwise() {
-  uint32_t t=micros();
+void IRAM_ATTR countCounterclockwiseEdge(uint32_t t) {
   if((uint32_t)(t-lastPulseB)<PULSE_DEBOUNCE_US)return;
   lastPulseB=t;rawB++;knobDelta--;
+}
+void IRAM_ATTR knobClockwise() {
+  const uint32_t t=micros();
+  const bool high=gpio_get_level((gpio_num_t)PIN_A)!=0;
+  if(high)rawARising++;
+  else rawAFalling++;
+  if(high==clockwiseRising)countClockwiseEdge(t);
+}
+void IRAM_ATTR knobCounterclockwise() {
+  const uint32_t t=micros();
+  const bool high=gpio_get_level((gpio_num_t)PIN_B)!=0;
+  if(high)rawBRising++;
+  else rawBFalling++;
+  if(!high)countCounterclockwiseEdge(t);
 }
 void markSaved() {needsSave=true; lastChange=millis();}
 void printAt(const char *s,int x,int y,int scale,uint16_t c) {
@@ -103,7 +119,7 @@ void changePage(Page next) {
 void persist() {
   store.putUChar("players",players);store.putUChar("initial",startLife);
   store.putUChar("bright",brightness);store.putUChar("pulseDiv",knobDivider);
-  store.putBool("reverse",invertKnob);store.putBool("playing",playing);
+  store.putBool("reverse",invertKnob);store.putBool("cwRise",clockwiseRising);store.putBool("playing",playing);
   for(int p=0;p<2;p++){
     String suffix=String(p);
     store.putShort(("life"+suffix).c_str(),life[p]);
@@ -121,6 +137,7 @@ void load() {
   brightness=constrain(store.getUChar("bright",210),40,255);
   knobDivider=constrain((int)store.getUChar("pulseDiv",1),1,4);
   invertKnob=store.getBool("reverse",false);
+  clockwiseRising=store.getBool("cwRise",true);
   playing=store.getBool("playing",false);
   for(int p=0;p<2;p++){
     String suffix=String(p);
@@ -168,7 +185,7 @@ void newGame() {
   selected=0;playing=true;markSaved();changePage(GAME);
 }
 void drawHome(){
-  base("MAGIC KNOB OS");centered("2.0 ALPHA 4.1",77,2,MK_FAINT);
+  base("MAGIC KNOB OS");centered("2.0 ALPHA 4.2",77,2,MK_FAINT);
   uiButton(90,111,180,54,"MAGIC",3,0x10c4);
   uiButton(90,174,180,42,"NUOVA",2);
   uiButton(90,222,180,42,"STRUMENTI",2);
@@ -406,21 +423,23 @@ void displayValues(){
 }
 void drawKnobSettings(){
   base("GHIERA");
-  centered("DIREZIONE",87,2,MK_FAINT);
-  uiButton(80,115,200,42,invertKnob?"INVERTITA":"NORMALE",2);
-  centered("SENSIBILITA GHIERA",174,2,MK_FAINT);
-  uiButton(76,207,60,48,"-",3);
-  uiButton(224,207,60,48,"+",3);
+  centered("DIREZIONE",77,2,MK_FAINT);
+  uiButton(80,96,200,37,invertKnob?"INVERTITA":"NORMALE",2);
+  centered("SENSIBILITA",142,2,MK_FAINT);
+  uiButton(76,163,60,43,"-",3);
+  uiButton(224,163,60,43,"+",3);
   char buf[8];snprintf(buf,sizeof(buf),"%u",knobDivider);
-  centered(buf,216,4,MK_GOLD);
-  centered("1 = massima sensibilita",265,1,MK_FAINT);
-  uiButton(111,291,138,36,"INDIETRO",2);
+  centered(buf,172,3,MK_GOLD);
+  centered("1 = uno scatto per vita",212,1,MK_FAINT);
+  centered("SCATTO VERSO DESTRA",236,1,MK_GOLD);
+  uiButton(79,251,202,35,clockwiseRising?"FRONTE SALITA":"FRONTE DISCESA",1);
+  uiButton(112,293,136,34,"INDIETRO",2);
 }
 void knobValues(){
   if(page!=KNOB_SETTINGS)return;
-  lcd->fillRect(145,207,70,52,MK_DARK);
+  lcd->fillRect(145,164,70,42,MK_DARK);
   char buf[8];snprintf(buf,sizeof(buf),"%u",knobDivider);
-  centered(buf,217,4,MK_GOLD);
+  centered(buf,173,3,MK_GOLD);
 }
 void drawBattery(){
   base("BATTERIA");
@@ -454,20 +473,28 @@ void updateBatteryDisplay(){
 }
 void drawDiagnostics(){
   base("DIAGNOSTICA");
-  centered("Ruota nei due versi",82,2,MK_FAINT);
-  centered("Impulsi rilevati",112,2,MK_FAINT);
-  uiButton(101,277,158,44,"INDIETRO",2);
+  centered("RUOTA UN SOLO SCATTO",77,1,MK_FAINT);
+  uiButton(58,278,116,42,"AZZERA",2);
+  uiButton(184,278,116,42,"INDIETRO",1);
 }
 void redrawDiagnostics(){
   if(page!=DIAG)return;
-  uint32_t a,b;noInterrupts();a=rawA;b=rawB;interrupts();
-  lcd->fillRect(93,145,175,118,MK_DARK);
-  char s[40];snprintf(s,sizeof(s),"A: %lu",(unsigned long)a);centered(s,153,2,MK_BLUE);
-  snprintf(s,sizeof(s),"B: %lu",(unsigned long)b);centered(s,185,2,MK_AMBER);
-  if(batterySampleValid){
-    snprintf(s,sizeof(s),"ADC x2: %.2f V",batteryVolts);
-    centered(s,225,1,MK_FAINT);
-  }
+  uint32_t a,b,af,ar,bf,br;
+  noInterrupts();
+  a=rawA;b=rawB;af=rawAFalling;ar=rawARising;
+  bf=rawBFalling;br=rawBRising;
+  interrupts();
+  lcd->fillRect(52,99,256,169,MK_DARK);
+  char s[48];
+  snprintf(s,sizeof(s),"DESTRA: %lu",(unsigned long)a);
+  centered(s,107,2,MK_BLUE);
+  snprintf(s,sizeof(s),"GIU:%lu  SU:%lu",(unsigned long)af,(unsigned long)ar);
+  centered(s,139,1,MK_FAINT);
+  snprintf(s,sizeof(s),"SINISTRA: %lu",(unsigned long)b);
+  centered(s,171,2,MK_AMBER);
+  snprintf(s,sizeof(s),"GIU:%lu  SU:%lu",(unsigned long)bf,(unsigned long)br);
+  centered(s,203,1,MK_FAINT);
+  centered(clockwiseRising?"DESTRA: SALITA":"DESTRA: DISCESA",237,1,MK_GOLD);
 }
 void render(){
   switch(page) {
@@ -585,14 +612,26 @@ void touchAction(int x,int y){
     else if(within(x,y,220,163,282,215)){brightness=min(255,(int)brightness+15);setBrightness();markSaved();displayValues();}
     else if(within(x,y,109,280,251,317))changePage(SETTINGS);
   } else if(page==KNOB_SETTINGS){
-    if(within(x,y,80,115,280,157)){invertKnob=!invertKnob;markSaved();fresh=true;}
-    else if(within(x,y,76,207,136,255)){knobDivider=max(1,(int)knobDivider-1);markSaved();knobValues();}
-    else if(within(x,y,224,207,284,255)){knobDivider=min(4,(int)knobDivider+1);markSaved();knobValues();}
-    else if(within(x,y,111,291,249,327))changePage(SETTINGS);
+    if(within(x,y,80,96,280,133)){invertKnob=!invertKnob;markSaved();fresh=true;}
+    else if(within(x,y,76,163,136,206)){knobDivider=max(1,(int)knobDivider-1);markSaved();knobValues();}
+    else if(within(x,y,224,163,284,206)){knobDivider=min(4,(int)knobDivider+1);markSaved();knobValues();}
+    else if(within(x,y,79,251,281,286)){
+      noInterrupts();
+      clockwiseRising=!clockwiseRising;
+      lastPulseA=micros();
+      interrupts();
+      markSaved();fresh=true;
+    }
+    else if(within(x,y,112,293,248,327))changePage(SETTINGS);
   } else if(page==BATTERY){
     if(within(x,y,106,285,254,322))changePage(SETTINGS);
   } else if(page==DIAG){
-    if(within(x,y,101,277,259,321))changePage(SETTINGS);
+    if(within(x,y,58,278,174,320)){
+      noInterrupts();
+      rawA=rawB=rawAFalling=rawARising=rawBFalling=rawBRising=0;
+      interrupts();
+      redrawDiagnostics();
+    }else if(within(x,y,184,278,300,320))changePage(SETTINGS);
   }
 }
 void setup(){
@@ -602,8 +641,8 @@ void setup(){
   sampleBattery(true);
   pinMode(PIN_BL,OUTPUT);digitalWrite(PIN_BL,LOW);
   pinMode(PIN_A,INPUT_PULLUP);pinMode(PIN_B,INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(PIN_A),knobClockwise,FALLING);
-  attachInterrupt(digitalPinToInterrupt(PIN_B),knobCounterclockwise,FALLING);
+  attachInterrupt(digitalPinToInterrupt(PIN_A),knobClockwise,CHANGE);
+  attachInterrupt(digitalPinToInterrupt(PIN_B),knobCounterclockwise,CHANGE);
   Wire.begin(PIN_SDA,PIN_SCL);Wire.setClock(400000);
   pinMode(PIN_TPRST,OUTPUT);digitalWrite(PIN_TPRST,LOW);delay(35);
   digitalWrite(PIN_TPRST,HIGH);delay(150);
