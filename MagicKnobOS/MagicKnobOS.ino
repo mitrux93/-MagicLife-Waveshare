@@ -300,11 +300,8 @@ void drawOwners(){
   if(monarchOwner==255)strcpy(m,"-");else snprintf(m,sizeof(m),"P%u",monarchOwner+1);
   if(initiativeOwner==255)strcpy(i,"-");else snprintf(i,sizeof(i),"P%u",initiativeOwner+1);
   snprintf(s,sizeof(s),"MONARCA:%s  INIZIATIVA:%s",m,i);
-  lcd->fillRect(54,306,252,24,MK_DARK);
-  for(int p=0;p<players;p++)if(commanderKnockout(p)){
-    char warn[24];snprintf(warn,sizeof(warn),"P%u: KO COMMANDER",p+1);
-    centered(warn,306,1,MK_RED);break;
-  }
+  // Reserve the status strip below the bottom buttons (1/3/4-player UI).
+  lcd->fillRect(54,319,252,10,MK_DARK);
   centered(s,320,1,MK_FAINT);
 }
 void drawHome(){
@@ -460,6 +457,8 @@ void drawGame(){
     lifeArea(0);lifeArea(1);
     paintSelection();
   }
+  if(players!=2 && commanderKnockout(selected))
+    centered("KO: DANNI COMMANDER",264,1,MK_RED);
   drawTurnLine();drawOwners();
 }
 
@@ -529,8 +528,14 @@ void drawHistory(){
       case EV_COMMANDER:snprintf(label,sizeof(label),"CMD P%u%c > P%u  %d>%d",
                   ev.actor+1,ev.slot?'B':'A',ev.target+1,ev.before,ev.after);break;
       case EV_TURN:snprintf(label,sizeof(label),"TURNO P%u",ev.actor+1);break;
-      case EV_MONARCH:snprintf(label,sizeof(label),"MONARCA %s",ev.after==255?"NESSUNO":"ASSEG.");break;
-      case EV_INITIATIVE:snprintf(label,sizeof(label),"INIZIATIVA %s",ev.after==255?"NESSUNO":"ASSEG.");break;
+      case EV_MONARCH:
+        if(ev.after==255)strcpy(label,"MONARCA: NESSUNO");
+        else snprintf(label,sizeof(label),"MONARCA: P%d",ev.after+1);
+        break;
+      case EV_INITIATIVE:
+        if(ev.after==255)strcpy(label,"INIZIATIVA: NESSUNO");
+        else snprintf(label,sizeof(label),"INIZIATIVA: P%d",ev.after+1);
+        break;
       default:snprintf(label,sizeof(label),"ANNULLATA ULTIMA MODIFICA");break;
     }
     printAt(label,74,y+13,1,ev.kind==EV_COMMANDER?MK_AMBER:MK_WHITE);
