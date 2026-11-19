@@ -211,10 +211,24 @@ bool netPacketPop(IncomingNetPacket &out){
   return got;
 }
 void netApplyState(const NetState &state){
-  // Never trust unvalidated wireless sizes/indices.
+  // Never trust remote sizes or indices. The viewer is a read-only copy.
   if(state.players<1||state.players>4||state.activeTurn>=state.players||
      state.selected>=state.players)return;
-  players=state.players;startLife=(state.startLife==20)?20:40;
+  const bool major=(players!=state.players || playing!=(state.playing!=0) ||
+       selected!=state.selected || activeTurn!=state.activeTurn ||
+       turnSteps!=state.turns ||
+       monarchOwner!=(state.monarch<state.players?state.monarch:255) ||
+       initiativeOwner!=(state.initiative<state.players?state.initiative:255));
+  bool oldKO[4];
+  for(int p=0;p<4;p++)oldKO[p]=commanderKnockout(p);
+  uint8_t changedMask=0;
+  for(int p=0;p<4;p++){
+    if(life[p]!=state.life[p]||poison[p]!=state.poison[p]||
+       energy[p]!=state.energy[p]||tax[p]!=state.tax[p])
+       changedMask|=(1<<p);
+  }
+  players=state.players;
+  startLife=state.startLife==20?20:40;
   playing=state.playing!=0;
   selected=state.selected;activeTurn=state.activeTurn;
   monarchOwner=(state.monarch<players)?state.monarch:255;
@@ -233,11 +247,16 @@ void netApplyState(const NetState &state){
   memcpy(commanderMatrix,state.commander,sizeof(commanderMatrix));
   for(int p=0;p<4;p++)for(int c=0;c<2;c++)for(int t=0;t<4;t++)
     commanderMatrix[p][c][t]=constrain(commanderMatrix[p][c][t],0,999);
-  // The mirror does not save remote game state into its own NVS or generate
-  // local history, which protects its previous standalone game.
+  for(int p=0;p<players;p++)if(oldKO[p]!=commanderKnockout(p))
+    changedMask|=(1<<p);
+  // Do not persist remote data or create local history.
   clearUndo();
-  if(page==NETWORK)fresh=true;
-  else changePage(GAME);
+  if(page==NETWORK)return; // leave the pairing/status controls accessible
+  if(page!=GAME || major){
+    changePage(GAME);
+  }else if(changedMask){
+    lifeDirty=true;lifeDirtyMask|=changedMask;
+  }
 }
 void netHandlePacket(const IncomingNetPacket &received){
   const NetPacket &packet=received.packet;
@@ -419,7 +438,7 @@ void base(const char *title) {
   lcd->drawFastHLine(100,330,160,MK_PANEL2);
   centered(title,37,2,MK_GOLD);
   lcd->drawFastHLine(93,64,174,MK_PANEL2);
-  if(page!=HOME)centered("SWIPE > HOME",342,1,MK_FAINT);
+  if(page!=HOME)centered(netRole==NET_VIEWER?"TOCCA: RETE":"SWIPE > HOME",342,1,MK_FAINT);
 }
 void changePage(Page next) {
   if(next!=GAME)for(auto &fx:knockout)fx.active=false;
@@ -1095,7 +1114,7 @@ void drawNetwork(){
                netPaired?"COLLEGATO":"RICERCA",
                (unsigned long)netReceivedSequence);
   centered(msg,303,1,netPaired?MK_GREEN:MK_FAINT);
-  uiButton(119,318,122,25,"INDIETRO",1);
+  uiButton(119,318,122,25,netRole!=NET_OFF&&playing?"PARTITA":"INDIETRO",1);
 }
 void drawDisplaySettings(){
   base("SCHERMO");
@@ -1455,7 +1474,10 @@ void touchAction(int x,int y){
       if(netRole==NET_OFF)netStart(netChoice);
       else netStop();
       fresh=true;
-    }else if(within(x,y,119,318,241,343))changePage(SETTINGS);
+    }else if(within(x,y,119,318,241,343)){
+      if(netRole!=NET_OFF&&playing)changePage(GAME);
+      else changePage(SETTINGS);
+    }
   } else if(page==DISPLAY_SETTINGS){
     if(within(x,y,78,163,140,215)){brightness=max(40,(int)brightness-15);setBrightness();markSaved();displayValues();}
     else if(within(x,y,220,163,282,215)){brightness=min(255,(int)brightness+15);setBrightness();markSaved();displayValues();}
