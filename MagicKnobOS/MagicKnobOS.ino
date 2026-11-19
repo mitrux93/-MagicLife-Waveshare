@@ -394,7 +394,7 @@ void knockoutBadge(int p,uint16_t color){
 bool splitCardBounds(int p,int &x,int &y,int &w,int &h){
   if(p<0||p>=players||players<3)return false;
   if(players==3){
-    if(p==0){x=97;y=76;w=166;h=100;}
+    if(p==0){x=97;y=72;w=166;h=91;}
     else {x=p==1?47:189;y=196;w=124;h=98;}
   }else{
     x=(p%2)?189:47;
@@ -428,7 +428,8 @@ void drawSplitCard(int p){
   splitChangeButton(x+16,y+55,false,MK_RED);
   splitChangeButton(x+w-16,y+55,true,MK_GREEN);
   snprintf(b,sizeof(b),"V%d E%d T%d",poison[p],energy[p],tax[p]);
-  printAt(b,x+(w-(int)strlen(b)*6)/2,y+82,1,MK_FAINT);
+  int statsY=(players==3&&p==0)?y+74:y+82;
+  printAt(b,x+(w-(int)strlen(b)*6)/2,statsY,1,MK_FAINT);
 }
 void drawSplitMenu(){
   // Repaint this after a card update: card corners overlap its circular edge.
