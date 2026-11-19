@@ -88,6 +88,7 @@ bool commanderKnockout(int target){
   return false;
 }
 
+bool needsSave=false;
 // ESP-NOW Alpha 8: one authoritative host and one passive scoreboard
 // mirror. Single Wi-Fi channel and bounded packets (<250 bytes).
 // No password-based cryptography: four-digit matching code is a discovery
@@ -338,7 +339,6 @@ float batteryVolts=0.0f;
 bool batterySampleValid=false;
 uint32_t lastLifePaintAt=0;
 uint32_t lastSelectionPaintAt=0;
-bool needsSave=false;
 volatile int32_t knobDelta=0;
 volatile uint32_t rawA=0, rawB=0;
 volatile uint32_t rawAFalling=0, rawARising=0, rawBFalling=0, rawBRising=0;
