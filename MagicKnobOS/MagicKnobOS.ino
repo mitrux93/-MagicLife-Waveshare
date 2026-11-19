@@ -500,8 +500,9 @@ void drawCommanderDamage(){
   }
   plusMinus(70,264,false,MK_RED);plusMinus(290,264,true,MK_GREEN);
   drawCommanderValue();
-  uiButton(99,310,162,30,commanderAutoLife?"VITA AUTO: SI":"VITA AUTO: NO",1,
+  uiButton(92,308,82,29,commanderAutoLife?"VITE SI":"VITE NO",1,
            commanderAutoLife?MK_GREEN:MK_PANEL2);
+  uiButton(187,308,82,29,"MENU",2);
 }
 void drawHistory(){
   base("CRONOLOGIA");
@@ -961,9 +962,9 @@ void touchAction(int x,int y){
       }
     }else if(near(x,y,70,264))adjustCommanderDamage(-1);
     else if(near(x,y,290,264))adjustCommanderDamage(1);
-    else if(within(x,y,99,310,261,340)){
+    else if(within(x,y,92,308,174,337)){
       commanderAutoLife=!commanderAutoLife;markSaved();fresh=true;
-    }
+    }else if(within(x,y,187,308,269,337))changePage(GAME_MENU);
   } else if(page==HISTORY){
     if(within(x,y,61,284,174,315)){
       int maximum=historySize>HISTORY_ROWS?historySize-HISTORY_ROWS:0;
