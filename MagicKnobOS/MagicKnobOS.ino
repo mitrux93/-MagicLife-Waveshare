@@ -458,16 +458,83 @@ void drawGame(){
   }
   drawTurnLine();drawOwners();
 }
+
 void drawGameMenu(){
   base("MENU PARTITA");
-  uiButton(59,93,112,45,"DADI",2);
-  uiButton(187,93,112,45,"PRIMO",2);
-  uiButton(59,150,112,45,"TURNO",2);
-  uiButton(187,150,112,45,"STATO",2);
-  uiButton(59,207,112,45,"ANNULLA",1,lastUndo.kind==UNDO_NONE?MK_PANEL:MK_GREEN);
-  uiButton(187,207,112,45,"RESET",2,MK_RED);
-  uiButton(59,264,112,45,"HOME",2);
-  uiButton(187,264,112,45,"PARTITA",1,MK_BLUE);
+  const char* labels[10]={"COMMANDER","STORICO","DADI","STATO","TURNO","PRIMO","ANNULLA","RESET","HOME","PARTITA"};
+  for(int i=0;i<10;i++){
+    int x=i%2?187:59, y=76+(i/2)*51;
+    uint16_t color=i==6?(lastUndo.kind==UNDO_NONE?MK_PANEL:MK_GREEN):
+                    (i==7?MK_RED:(i==9?MK_BLUE:MK_PANEL2));
+    uiButton(x,y,112,40,labels[i],i==0||i==6||i==9?1:2,color);
+  }
+}
+void drawCommanderValue(){
+  if(page!=COMMANDER_DAMAGE)return;
+  lcd->fillRect(111,232,138,75,MK_DARK);
+  int value=commanderMatrix[commanderSource][commanderSlot][commanderTarget];
+  char buf[18];snprintf(buf,sizeof(buf),"%d",value);
+  int digits=strlen(buf);
+  int size=digits>=3?6:7;
+  centered(buf,244,size,value>=21?MK_RED:MK_WHITE);
+  if(value>=21)centered("KO CMD: 21+",294,1,MK_RED);
+  else centered("21 = SCONFITTA",294,1,MK_FAINT);
+}
+void drawCommanderDamage(){
+  base("DANNI COMMANDER");
+  centered("COMANDANTE DEL GIOCATORE",72,1,MK_FAINT);
+  for(int p=0;p<players;p++){
+    char b[4];snprintf(b,sizeof(b),"P%d",p+1);
+    uiButton(36+p*74,94,68,32,b,2,p==commanderSource?MK_BLUE:MK_PANEL);
+  }
+  uiButton(56,137,118,35,commanderSlot?"CMD B":"CMD A",2);
+  uiButton(187,137,118,35,partnerEnabled[commanderSource]?"PARTNER SI":"PARTNER NO",1,
+           partnerEnabled[commanderSource]?MK_GREEN:MK_PANEL);
+  centered("SUBISCE IL DANNO",179,1,MK_FAINT);
+  for(int p=0;p<players;p++){
+    char b[4];snprintf(b,sizeof(b),"P%d",p+1);
+    uiButton(36+p*74,195,68,32,b,2,p==commanderTarget?MK_AMBER:MK_PANEL);
+  }
+  plusMinus(70,264,false,MK_RED);plusMinus(290,264,true,MK_GREEN);
+  drawCommanderValue();
+  uiButton(99,310,162,30,commanderAutoLife?"VITA AUTO: SI":"VITA AUTO: NO",1,
+           commanderAutoLife?MK_GREEN:MK_PANEL2);
+}
+void drawHistory(){
+  base("CRONOLOGIA");
+  char summary[35];
+  snprintf(summary,sizeof(summary),"%u azioni - sessione",historySize);
+  centered(summary,68,1,MK_FAINT);
+  if(historySize==0)centered("NESSUNA AZIONE",160,2,MK_FAINT);
+  for(int i=0;i<HISTORY_ROWS;i++){
+    if(i+historyOffset>=historySize)break;
+    int index=(historyNext+HISTORY_CAPACITY-1-historyOffset-i)%HISTORY_CAPACITY;
+    const GameEvent &ev=events[index];
+    int y=85+i*38;
+    char elapsed[32];
+    snprintf(elapsed,sizeof(elapsed),"%02lu:%02lu",
+             (unsigned long)((ev.seconds/60)%100),(unsigned long)(ev.seconds%60));
+    printAt(elapsed,74,y,1,MK_FAINT);
+    char label[64]={};
+    switch(ev.kind){
+      case EV_START:snprintf(label,sizeof(label),"INIZIA: P%u",ev.actor+1);break;
+      case EV_LIFE:snprintf(label,sizeof(label),"P%u VITE %d > %d",ev.actor+1,ev.before,ev.after);break;
+      case EV_COUNTER:snprintf(label,sizeof(label),"P%u %s %d>%d",ev.actor+1,
+                 ev.slot==POISON?"VEL":ev.slot==ENERGY?"ENE":ev.slot==TAX?"TAX":
+                 ev.slot==TREASURE?"TES":"ESP",ev.before,ev.after);break;
+      case EV_COMMANDER:snprintf(label,sizeof(label),"CMD P%u%c > P%u  %d>%d",
+                  ev.actor+1,ev.slot?'B':'A',ev.target+1,ev.before,ev.after);break;
+      case EV_TURN:snprintf(label,sizeof(label),"TURNO P%u",ev.actor+1);break;
+      case EV_MONARCH:snprintf(label,sizeof(label),"MONARCA %s",ev.after==255?"NESSUNO":"ASSEG.");break;
+      case EV_INITIATIVE:snprintf(label,sizeof(label),"INIZIATIVA %s",ev.after==255?"NESSUNO":"ASSEG.");break;
+      default:snprintf(label,sizeof(label),"ANNULLATA ULTIMA MODIFICA");break;
+    }
+    printAt(label,74,y+13,1,ev.kind==EV_COMMANDER?MK_AMBER:MK_WHITE);
+    lcd->drawFastHLine(74,y+29,212,MK_PANEL2);
+  }
+  uiButton(61,284,113,31,"PRECEDENTI",1);
+  uiButton(186,284,113,31,"RECENTI",1);
+  uiButton(117,317,126,28,"MENU",2);
 }
 void drawFirstPlayer(){
   base("CHI INIZIA?");
