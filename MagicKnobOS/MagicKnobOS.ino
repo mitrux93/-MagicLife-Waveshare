@@ -299,6 +299,11 @@ void lifeArea(int p){
   char buf[16];snprintf(buf,sizeof(buf),"%d",life[p]);
   if(players!=2){
     if(p!=selected)return;
+    // Update both large life total and the selected player's overview chip.
+    int w=players==1?110:76,gap=players==1?0:4;
+    int left=(360-(players*w+(players-1)*gap))/2;
+    char chip[20];snprintf(chip,sizeof(chip),"P%d:%d",p+1,life[p]);
+    uiButton(left+p*(w+gap),91,w,37,chip,1,MK_BLUE);
     lcd->fillRect(92,173,176,85,MK_DARK);
     int digits=strlen(buf);
     int size=digits<=2?9:(digits==3?7:5);
