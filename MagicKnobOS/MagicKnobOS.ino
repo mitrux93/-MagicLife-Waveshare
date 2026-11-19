@@ -120,6 +120,8 @@ uint32_t netAckSequence=0;
 bool netReady=false,netPaired=false,netDirty=false,netError=false;
 uint8_t netRemoteMac[6]={};
 NetPacket netLastSnapshot={};
+NetState netLocalBackup={};
+bool netBackupValid=false;
 portMUX_TYPE netMux=portMUX_INITIALIZER_UNLOCKED;
 struct IncomingNetPacket {
   NetPacket packet;
@@ -182,14 +184,26 @@ bool netSend(NetMsgType type,const uint8_t* addr,uint32_t sequence,bool includeS
   return err==ESP_OK;
 }
 void netStop(){
+  const bool restore=(netRole==NET_VIEWER && netBackupValid);
   if(netReady)esp_now_deinit();
   WiFi.mode(WIFI_OFF);
   netReady=false;netRole=NET_OFF;netPaired=false;netError=false;
   netLastSeen=0;netLastAckAt=0;netDirty=false;netReceivedSequence=0;
+  portENTER_CRITICAL(&netMux);
   netHead=netTail=0;
+  portEXIT_CRITICAL(&netMux);
+  if(restore){
+    netApplyState(netLocalBackup);
+    netBackupValid=false;
+  }
 }
 bool netStart(NetRole role){
+  if(needsSave)persist();
   netStop();
+  if(role==NET_VIEWER){
+    netLocalBackup=netCaptureState();
+    netBackupValid=true;
+  }
   WiFi.mode(WIFI_STA);
   WiFi.disconnect(false,false);
   if(esp_wifi_set_channel(NET_CHANNEL,WIFI_SECOND_CHAN_NONE)!=ESP_OK){
@@ -245,7 +259,8 @@ void netApplyState(const NetState &state){
   // The mirror does not save remote game state into its own NVS or generate
   // local history, which protects its previous standalone game.
   clearUndo();
-  changePage(GAME);
+  if(page==NETWORK)fresh=true;
+  else changePage(GAME);
 }
 void netHandlePacket(const IncomingNetPacket &received){
   const NetPacket &packet=received.packet;
@@ -294,8 +309,8 @@ void netPoll(){
       if((uint32_t)(now-netLastStateSent)>=120){
         netLastStateSent=now;
         netSendSequence++;
-        netSend(NET_STATE,netRemoteMac,netSendSequence,true);
-        netDirty=false;
+        if(netSend(NET_STATE,netRemoteMac,netSendSequence,true))
+          netDirty=false;
       }
     }
     if(netPaired && (uint32_t)(now-netLastSeen)>8000){
@@ -401,7 +416,11 @@ void IRAM_ATTR knobCounterclockwise(){
   portEXIT_CRITICAL_ISR(&knobMux);
   if(!high)countCounterclockwiseEdge(t);
 }
-void markSaved() {needsSave=true; lastChange=millis();}
+void markSaved() {
+  if(netRole==NET_VIEWER)return; // mirror never overwrites its own game in NVS
+  needsSave=true;lastChange=millis();
+  if(netRole==NET_HOST)netDirty=true;
+}
 void printAt(const char *s,int x,int y,int scale,uint16_t c) {
   lcd->setTextWrap(false);lcd->setTextColor(c);lcd->setTextSize(scale);
   lcd->setCursor(x,y);lcd->print(s);
@@ -573,9 +592,12 @@ void drawOwners(){
   // Reserve the status strip below the bottom buttons (1/3/4-player UI).
   lcd->fillRect(54,319,252,10,MK_DARK);
   centered(s,320,1,MK_FAINT);
+  if(netRole!=NET_OFF)
+    printAt(netRole==NET_HOST?"H":"V",61,320,1,
+            netPaired?MK_GREEN:MK_AMBER);
 }
 void drawHome(){
-  base("MAGIC KNOB OS");centered("2.0 ALPHA 6",77,2,MK_FAINT);
+  base("MAGIC KNOB OS");centered("2.0 ALPHA 8",77,2,MK_FAINT);
   uiButton(90,111,180,54,"MAGIC",3,0x10c4);
   uiButton(90,174,180,42,"NUOVA",2);
   uiButton(90,222,180,42,"STRUMENTI",2);
@@ -1062,10 +1084,41 @@ void repaintTimer(){
 }
 void drawSettings(){
   base("IMPOSTAZIONI");
-  uiButton(80,92,200,43,"SCHERMO",2);
-  uiButton(80,146,200,43,"GHIERA",2);
-  uiButton(80,200,200,43,"BATTERIA",2);
-  uiButton(80,254,200,43,"DIAGNOSTICA",2);
+  uiButton(80,75,200,39,"SCHERMO",2);
+  uiButton(80,122,200,39,"GHIERA",2);
+  uiButton(80,169,200,39,"ALIMENTAZIONE",1);
+  uiButton(80,216,200,39,"DIAGNOSTICA",2);
+  uiButton(80,263,200,39,"RETE ESP-NOW",2);
+}
+void drawNetwork(){
+  base("RETE ESP-NOW");
+  centered("UN PRINCIPALE + UN VISORE",72,1,MK_FAINT);
+  uiButton(72,94,104,39,"HOST",2,(netRole?netRole:netChoice)==NET_HOST?MK_BLUE:MK_PANEL);
+  uiButton(184,94,104,39,"VISORE",2,(netRole?netRole:netChoice)==NET_VIEWER?MK_AMBER:MK_PANEL);
+  centered("CODICE ABBINAMENTO",142,1,MK_FAINT);
+  const uint16_t value=netRole==NET_HOST?netPin:netEntry;
+  for(int i=0;i<4;i++){
+    int div=i==0?1000:(i==1?100:(i==2?10:1));
+    char b[2];snprintf(b,sizeof(b),"%u",(value/div)%10);
+    int x=77+i*52;
+    uint16_t c=(netRole==NET_OFF&&netChoice==NET_VIEWER&&netDigit==i)?MK_GOLD:MK_PANEL2;
+    uiButton(x,156,46,42,b,3,c);
+  }
+  uiButton(69,207,74,34,"-",3);
+  uiButton(217,207,74,34,"+",3);
+  uiButton(100,254,160,41,netRole==NET_OFF?"AVVIA":"FERMA",2,
+           netRole==NET_OFF?MK_GREEN:MK_RED);
+  char msg[48];
+  if(netError)strcpy(msg,"ERRORE RADIO");
+  else if(netRole==NET_OFF)strcpy(msg,"SPENTO  |  CANALE 1");
+  else if(netRole==NET_HOST)
+    snprintf(msg,sizeof(msg),"%s  ACK %lu",netPaired?"COLLEGATO":"IN ATTESA",
+             (unsigned long)netAckSequence);
+  else snprintf(msg,sizeof(msg),"%s  STATO %lu",
+               netPaired?"COLLEGATO":"RICERCA",
+               (unsigned long)netReceivedSequence);
+  centered(msg,303,1,netPaired?MK_GREEN:MK_FAINT);
+  uiButton(119,318,122,25,"INDIETRO",1);
 }
 void drawDisplaySettings(){
   base("SCHERMO");
@@ -1180,6 +1233,7 @@ void render(){
     case KNOB_SETTINGS:drawKnobSettings();break;
     case BATTERY:drawBattery();break;
     case DIAG:drawDiagnostics();redrawDiagnostics();break;
+    case NETWORK:drawNetwork();break;
   }
   fresh=false;lifeDirty=false;lifeDirtyMask=0;selectionDirty=false;counterDirty=false;
 }
@@ -1227,6 +1281,12 @@ bool readTouch(int &x,int &y) {
 bool within(int x,int y,int l,int t,int r,int b){return x>=l&&x<=r&&y>=t&&y<=b;}
 bool near(int x,int y,int a,int b){long dx=x-a,dy=y-b;return dx*dx+dy*dy<=30L*30L;}
 void touchAction(int x,int y){
+  if(netRole==NET_VIEWER && page!=NETWORK){
+    // Mirror can only open its network configuration; it cannot modify
+    // life, Commander damage, ownership, or create a new game.
+    changePage(NETWORK);
+    return;
+  }
   if(page==HOME){
     if(within(x,y,90,111,270,165))changePage(playing?GAME:SETUP);
     else if(within(x,y,90,174,270,216))changePage(SETUP);
@@ -1400,10 +1460,25 @@ void touchAction(int x,int y){
     }else if(within(x,y,92,262,172,300)){timerRunning=false;timerElapsed=0;fresh=true;}
     else if(within(x,y,188,262,268,300))changePage(TOOLS);
   } else if(page==SETTINGS){
-    if(within(x,y,80,92,280,135))changePage(DISPLAY_SETTINGS);
-    else if(within(x,y,80,146,280,189))changePage(KNOB_SETTINGS);
-    else if(within(x,y,80,200,280,243))changePage(BATTERY);
-    else if(within(x,y,80,254,280,297))changePage(DIAG);
+    if(within(x,y,80,75,280,114))changePage(DISPLAY_SETTINGS);
+    else if(within(x,y,80,122,280,161))changePage(KNOB_SETTINGS);
+    else if(within(x,y,80,169,280,208))changePage(BATTERY);
+    else if(within(x,y,80,216,280,255))changePage(DIAG);
+    else if(within(x,y,80,263,280,302))changePage(NETWORK);
+  } else if(page==NETWORK){
+    if(within(x,y,72,94,176,133)&&netRole==NET_OFF){netChoice=NET_HOST;fresh=true;}
+    else if(within(x,y,184,94,288,133)&&netRole==NET_OFF){netChoice=NET_VIEWER;fresh=true;}
+    else if(y>=156&&y<=198&&netRole==NET_OFF&&netChoice==NET_VIEWER){
+      for(int i=0;i<4;i++)if(within(x,y,77+i*52,156,123+i*52,198)){netDigit=i;fresh=true;break;}
+    }else if(within(x,y,69,207,143,241)&&netRole==NET_OFF&&netChoice==NET_VIEWER){
+      netChangeDigit(-1);fresh=true;
+    }else if(within(x,y,217,207,291,241)&&netRole==NET_OFF&&netChoice==NET_VIEWER){
+      netChangeDigit(1);fresh=true;
+    }else if(within(x,y,100,254,260,295)){
+      if(netRole==NET_OFF)netStart(netChoice);
+      else netStop();
+      fresh=true;
+    }else if(within(x,y,119,318,241,343))changePage(SETTINGS);
   } else if(page==DISPLAY_SETTINGS){
     if(within(x,y,78,163,140,215)){brightness=max(40,(int)brightness-15);setBrightness();markSaved();displayValues();}
     else if(within(x,y,220,163,282,215)){brightness=min(255,(int)brightness+15);setBrightness();markSaved();displayValues();}
@@ -1463,6 +1538,11 @@ void setup(){
   setBrightness();
 }
 void loop(){
+  netPoll();
+  if(page==NETWORK){
+    static uint32_t lastNetDraw=0;
+    if(millis()-lastNetDraw>=850){lastNetDraw=millis();fresh=true;}
+  }
   portENTER_CRITICAL(&knobMux);
   int32_t amount=knobDelta;knobDelta=0;
   portEXIT_CRITICAL(&knobMux);
@@ -1474,7 +1554,11 @@ void loop(){
       pulseAccumulator-=(step*knobDivider);
       // Keep every counted pulse, including those accumulated while the
       // LCD is painting. Life limits are enforced inside adjustLife().
-      if(page==GAME)adjustLife(selected,step);
+      if(netRole==NET_VIEWER && page!=NETWORK){
+        // Ignore remote viewer encoder inputs, preserve the authoritative host.
+      }else if(page==NETWORK && netRole==NET_OFF && netChoice==NET_VIEWER){
+        netChangeDigit(step);fresh=true;
+      }else if(page==GAME)adjustLife(selected,step);
       else if(page==COUNTERS)adjustCounter(step);
       else if(page==COMMANDER_DAMAGE)adjustCommanderDamage(step);
       else if(page==HISTORY){
@@ -1507,7 +1591,7 @@ void loop(){
       }else{
         touchEndX=x;touchEndY=y;
         int dx=touchEndX-touchStartX,dy=touchEndY-touchStartY;
-        if(page!=HOME && !swipeAlreadyHandled && touchStartX<=115 &&
+        if(netRole!=NET_VIEWER && page!=HOME && !swipeAlreadyHandled && touchStartX<=115 &&
            dx>=100 && abs(dy)<=75 && millis()-touchStartMs<=1200) {
           swipeAlreadyHandled=true;
           changePage(HOME);
