@@ -876,8 +876,15 @@ void loop(){
       pulseAccumulator-=(step*knobDivider);
       // Keep every counted pulse, including those accumulated while the
       // LCD is painting. Life limits are enforced inside adjustLife().
-      if(page==GAME)adjustLife(players==1?0:selected,step);
+      if(page==GAME)adjustLife(selected,step);
       else if(page==COUNTERS)adjustCounter(step);
+      else if(page==FIRST_PLAYER){
+        firstCandidate=(uint8_t)(((int)firstCandidate+step%players+players)%players);
+        fresh=true;
+      }else if(page==GAME_STATUS){
+        selected=(uint8_t)(((int)selected+step%players+players)%players);
+        markSaved();fresh=true;
+      }
       else if(page==DISPLAY_SETTINGS){
         brightness=constrain((int)brightness+step*5,40,255);
         setBrightness();markSaved();displayValues();
@@ -921,8 +928,10 @@ void loop(){
       if(lifeDirty && (uint32_t)(now-lastLifePaintAt)>=25){
         uint8_t mask=lifeDirtyMask;
         lifeDirty=false;lifeDirtyMask=0;
-        if(mask&0x01)lifeArea(0);
-        if(players==2 && (mask&0x02))lifeArea(1);
+        if(players==2){
+          if(mask&0x01)lifeArea(0);
+          if(mask&0x02)lifeArea(1);
+        }else if(mask&(1<<selected))lifeArea(selected);
         lastLifePaintAt=millis();
       }
       if(selectionDirty){
@@ -931,6 +940,7 @@ void loop(){
         lastSelectionPaintAt=millis();
       }
       updateKOAnimations();
+      if((uint32_t)(millis()-lastTurnPaintAt)>=1000)drawTurnLine();
     }
     else if(page==COUNTERS&&counterDirty){redrawCounter();counterDirty=false;}
     if(page==TIMER&&millis()-lastDiagnostics>300){lastDiagnostics=millis();repaintTimer();}
